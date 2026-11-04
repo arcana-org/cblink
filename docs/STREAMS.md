@@ -122,6 +122,13 @@ Streams also share their connection's limits:
 | TCP, TLS, AF_UNIX | all kinds |
 | SCTP, DTLS over SCTP | all kinds; each stream travels on its own SCTP stream, so streams do not block each other (TRANSPORTS.md) |
 
+`CBL_SF_CONTROL` on `cbl_stream_open()` or `cbl_stream_accept()` puts
+what that end sends on the control lane (TRANSPORTS.md section 3.4):
+over SCTP, queued ahead of bulk frames and sent on SCTP stream 1, in
+order within the lane. For a stream of small, urgent messages (events,
+alarms) sharing a connection with dumps or large streams. Over TCP and
+AF_UNIX it changes nothing.
+
 ## 5. YANG on a stream
 
 A stream's frames carry YANG data like any body: a program models what

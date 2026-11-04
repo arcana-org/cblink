@@ -12,6 +12,7 @@ ATF_TESTS_C=	family_test \
 		frame_test \
 		malformed_test \
 		notify_test \
+		lane_test \
 		proxy_test \
 		sctp_raw_test \
 		sid_test \

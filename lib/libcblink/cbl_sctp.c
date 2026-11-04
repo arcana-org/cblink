@@ -7,10 +7,12 @@
 /*
  * SCTP, one-to-one style (docs/TRANSPORTS.md).
  *
- * SCTP stream 0 carries requests, responses and notifications; cblink
- * stream n travels on SCTP stream 1 + n mod (outbound streams - 1), so
- * cblink streams do not block each other or control traffic.  Several
- * hosts in the URI give multihoming (sctp_bindx, sctp_connectx).
+ * SCTP stream 0 carries requests, responses and notifications; the
+ * control lane (CBL_MCF_CONTROL groups, CBL_SF_CONTROL streams) SCTP
+ * stream 1; cblink stream n SCTP stream 2 + n mod (outbound streams -
+ * 2), so cblink streams do not block each other or control traffic, and
+ * nothing blocks the control lane.  Several hosts in the URI give
+ * multihoming (sctp_bindx, sctp_connectx).
  *
  * Plaintext: every frame is one SCTP message, so message boundaries do
  * the framing.  Fragment interleaving (level 2, with I-DATA when both
@@ -186,12 +188,13 @@ cbl_sctp_mux_free(struct cbl_sctp_mux *m)
 }
 
 /*
- * SCTP stream for a frame, from its header.  The number of outbound
- * streams is known once the association is up.
+ * SCTP stream for a frame, from its header and lane.  The number of
+ * outbound streams is known once the association is up; with two, the
+ * control lane shares SCTP stream 1 with the cblink streams.
  */
 uint16_t
 cbl_sctp_mux_sid(struct cbl_sctp_mux *m, int fd, const void *frame,
-    size_t len)
+    size_t len, bool control)
 {
 	struct sctp_status st;
 	socklen_t slen = sizeof(st);
@@ -206,11 +209,15 @@ cbl_sctp_mux_sid(struct cbl_sctp_mux *m, int fd, const void *frame,
 	}
 	if (len < CBL_HDRLEN || m->ostreams < 2)
 		return (0);
+	if (control)
+		return (1);
 	flags = cbl_be32dec((const unsigned char *)frame + 12);
 	id = cbl_be32dec((const unsigned char *)frame + 20);
 	if ((flags & CBL_F_S_ANY) == 0 || id == 0)
 		return (0);
-	return ((uint16_t)(1 + id % (uint32_t)(m->ostreams - 1)));
+	if (m->ostreams == 2)
+		return (1);
+	return ((uint16_t)(2 + id % (uint32_t)(m->ostreams - 2)));
 }
 
 static struct sctp_part *
@@ -332,7 +339,8 @@ sctp_write(cbl_conn *conn, const void *buf, size_t len, size_t *put)
 	    .iov_len = len };
 	ssize_t n;
 
-	si.snd_sid = cbl_sctp_mux_sid(t->mux, conn->fd, buf, len);
+	si.snd_sid = cbl_sctp_mux_sid(t->mux, conn->fd, buf, len,
+	    conn->tx_control);
 	n = sctp_sendv(conn->fd, &iov, 1, NULL, 0, &si, sizeof(si),
 	    SCTP_SENDV_SNDINFO, 0);
 	if (n == -1) {
@@ -455,6 +463,7 @@ const struct cbl_tr_ops cbl_tr_sctp_ops = {
 	.handshake = sctp_handshake,
 	.write = sctp_write,
 	.rx_frames = sctp_rx_frames,
+	.lanes = true,
 	.shutdown = sctp_shutdown,
 	.free = sctp_free,
 };

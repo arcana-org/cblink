@@ -99,6 +99,7 @@ send_ctl(cbl_conn *conn, const cbl_stream *s, uint32_t id, uint32_t flags,
 		(void)cbl_msg_put_error(msg, code, text, NULL, 0, -1);
 	if ((flags & CBL_F_S_CREDIT) != 0)
 		(void)cbl_fw_credit(msg, (uint32_t)credit);
+	msg->control = s != NULL && (s->flags & CBL_SF_CONTROL) != 0;
 	return (cbl_conn_enqueue_ctl(conn, msg));
 }
 
@@ -255,6 +256,7 @@ cbl_stream_open(cbl_conn *conn, cbl_msg *open_req, uint32_t flags,
 	open_req->hdr.stream = id;
 	open_req->hdr.seq = s->open_seq;
 	(void)cbl_fw_credit(open_req, s->window);
+	open_req->control = (flags & CBL_SF_CONTROL) != 0;
 	if ((error = cbl_conn_enqueue(conn, open_req)) != 0) {
 		pthread_mutex_lock(&conn->mtx);
 		RB_REMOVE(cbl_stream_tree, &conn->streams, s);
@@ -395,6 +397,7 @@ cbl_stream_accept(cbl_stream *s, cbl_msg *accept, uint32_t flags,
 	accept->hdr.seq = s->open_seq;
 	accept->hdr.stream = s->id;
 	(void)cbl_fw_credit(accept, s->rx_window);
+	accept->control = (flags & CBL_SF_CONTROL) != 0;
 	if ((error = cbl_conn_enqueue_ctl(conn, accept)) != 0) {
 		/*
 		 * Not sent, so not accepted: the caller keeps what "arg"
@@ -466,6 +469,7 @@ cbl_stream_send(cbl_stream *s, cbl_msg *msg)
 		return (EAGAIN);
 	}
 	s->tx_credit -= msg->len;
+	msg->control = (s->flags & CBL_SF_CONTROL) != 0;
 	if (last) {
 		s->tx_hclosed = true;
 		end = s->rx_hclosed;

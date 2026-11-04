@@ -22,7 +22,7 @@
 
 #define	CBLINK_VERSION_MAJOR	0
 #define	CBLINK_VERSION_MINOR	2
-#define	CBLINK_VERSION_PATCH	19
+#define	CBLINK_VERSION_PATCH	20
 
 #ifdef __cplusplus
 extern "C" {
@@ -296,6 +296,8 @@ int		 cbl_conn_send(cbl_conn *conn, cbl_msg *msg);
 #define	CBL_OPF_DENY		0x40
 
 #define	CBL_MCF_AUTH		0x10
+/* Its notifications on the control lane (SCTP: a stream of their own). */
+#define	CBL_MCF_CONTROL		0x20
 
 struct cbl_dump_state {
 	uint64_t	 pos[4];
@@ -476,6 +478,7 @@ struct cbl_stream_cbs {
 
 #define	CBL_SF_MANUAL_CREDIT	0x0001u
 #define	CBL_SF_PUSH		0x0002u	/* opener of a push stream */
+#define	CBL_SF_CONTROL		0x0004u	/* this end's frames on the control lane */
 
 int		 cbl_stream_open(cbl_conn *conn, cbl_msg *open_req,
 		    uint32_t flags, const struct cbl_stream_cbs *cbs, void *arg,

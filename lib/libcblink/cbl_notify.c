@@ -197,6 +197,7 @@ copy_with_missed(cbl_conn *conn, cbl_msg *msg)
 		return (NULL);
 	}
 	copy->hdr = msg->hdr;
+	copy->control = msg->control;
 	copy->hdr.length = 0;
 	/* Its items as they are, but the framework's; and ENOBUFS. */
 	body = cbl_msg_body(rx);
@@ -248,6 +249,8 @@ notify_prepare(cbl_family *fam, uint32_t group_idx, cbl_msg *msg)
 	msg->hdr.flags = CBL_F_NOTIFY;
 	msg->hdr.seq = 0;
 	msg->hdr.stream = fam->group_base + group_idx;
+	msg->control = (fam->def->mcgrps[group_idx].flags &
+	    CBL_MCF_CONTROL) != 0;
 	return (cbl_msg_encode(msg, NULL, NULL));
 }
 

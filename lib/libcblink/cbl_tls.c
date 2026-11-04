@@ -748,7 +748,8 @@ dtls_sctp_frame_start(cbl_conn *conn, const void *frame, size_t len)
 	struct bio_dgram_sctp_sndinfo si = { 0 };
 
 	/* Application data only: handshake records stay on stream 0. */
-	si.snd_sid = cbl_sctp_mux_sid(t->mux, conn->fd, frame, len);
+	si.snd_sid = cbl_sctp_mux_sid(t->mux, conn->fd, frame, len,
+	    conn->tx_control);
 	(void)BIO_ctrl(SSL_get_wbio(t->ssl), BIO_CTRL_DGRAM_SCTP_SET_SNDINFO,
 	    sizeof(si), &si);
 }
@@ -831,6 +832,7 @@ const struct cbl_tr_ops cbl_tr_dtls_sctp_ops = {
 	.write = dtls_sctp_write,
 	.frame_start = dtls_sctp_frame_start,
 	.rx_frames = dtls_sctp_rx_frames,
+	.lanes = true,
 	.shutdown = tls_shutdown,
 	.free = tls_free,
 };

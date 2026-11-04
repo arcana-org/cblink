@@ -3,7 +3,7 @@
 .\"
 .\" Copyright (c) 2026 Pouria Mousavizadeh Tehrani <pouria@FreeBSD.org>
 .\"
-.Dd October 14, 2026
+.Dd November 4, 2026
 .Dt CBLINK 3
 .Os
 .Sh NAME
@@ -414,6 +414,12 @@ or to one peer with
 .Fn cbl_conn_notify ;
 .Fn cbl_conn_subscribed
 says whether a peer joined, for what is told only to those that asked.
+A group flagged
+.Dv CBL_MCF_CONTROL
+has its notifications sent on the control lane: over SCTP, queued
+ahead of other frames and sent on SCTP stream 1, so that a dump or a
+large stream on the association does not hold them up; over TCP and
+AF_UNIX nothing changes.
 A YANG notification goes to the YANG family's group
 .Ql notify
 with
@@ -439,6 +445,14 @@ A sender that runs out of credit gets
 and is called back through
 .Fa on_writable
 when the receiver grants more.
+.Dv CBL_SF_CONTROL ,
+given to
+.Fn cbl_stream_open
+or
+.Fn cbl_stream_accept ,
+puts what that end sends on the control lane, as for a
+.Dv CBL_MCF_CONTROL
+group; the YANG family accepts an event stream's subscription so.
 A thread that may call a stream after it ended holds it with
 .Fn cbl_stream_ref
 and

@@ -647,6 +647,7 @@ struct cbl_op {
 	cbl_stream_open_f		*stream_open;
 };
 #define	CBL_MCF_AUTH	0x10
+#define	CBL_MCF_CONTROL	0x20	/* the control lane (TRANSPORTS.md 3.4) */
 struct cbl_mcgrp { const char *name; uint32_t flags; };
 
 #define	CBL_FAMILY_ABI	1
@@ -799,6 +800,8 @@ struct cbl_stream_cbs {
 	void	(*on_writable)(cbl_stream *, size_t credit, void *arg);
 };
 #define	CBL_SF_MANUAL_CREDIT	0x01	/* app calls cbl_stream_consumed() */
+#define	CBL_SF_PUSH		0x02	/* opener of a push stream */
+#define	CBL_SF_CONTROL		0x04	/* this end's frames on the control lane */
 
 int	cbl_stream_open(cbl_conn *, cbl_msg *open_req, uint32_t flags,
 	    const struct cbl_stream_cbs *, void *arg, cbl_stream **);

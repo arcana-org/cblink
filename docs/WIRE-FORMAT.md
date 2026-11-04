@@ -761,11 +761,16 @@ into a buffer allocated only after validation.
 - **Plaintext:** one frame per SCTP message. Message boundaries replace the
   `length` scan, and `length` MUST equal the message size.
 - **SCTP stream mapping:** SCTP stream 0 carries everything that is not a
-  cblink stream frame. cblink stream `n` is mapped to SCTP stream
-  `1 + (n mod (os − 1))`, where `os` is the negotiated number of outbound
+  cblink stream frame or on the control lane. SCTP stream 1 is the
+  control lane: the frames a sender chose to keep ahead of bulk traffic
+  (TRANSPORTS.md section 3.4), notifications or a whole stream's frames
+  from its open or accept on. cblink stream `n` is mapped to SCTP stream
+  `2 + (n mod (os − 2))`, where `os` is the negotiated number of outbound
   streams. Ordering within a cblink stream is preserved, and cblink streams
-  do not block each other or control traffic. When `os == 1`, everything uses
-  SCTP stream 0.
+  do not block each other or control traffic. When `os == 2`, the control
+  lane and every cblink stream use SCTP stream 1; when `os == 1`,
+  everything uses SCTP stream 0. A receiver routes frames by their
+  header, whatever SCTP stream they came on.
 - **DTLS over SCTP (RFC 6083), mTLS:** base OpenSSL supports it
   (`BIO_new_dgram_sctp`), and it requires SCTP-AUTH
   (`net.inet.sctp.auth_enable=1`, the default). DTLS records are limited to

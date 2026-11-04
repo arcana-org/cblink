@@ -418,6 +418,7 @@ conn_flush(cbl_conn *conn)
 	pthread_mutex_lock(&conn->mtx);
 	conn->want &= ~CBL_EV_WRITE;
 	while ((e = STAILQ_FIRST(&conn->txq)) != NULL) {
+		conn->tx_control = e->control;
 		if (e->off == 0 && conn->ops->frame_start != NULL)
 			conn->ops->frame_start(conn, e->msg->buf, e->msg->len);
 		error = conn->ops->write(conn, e->msg->buf + e->off,
@@ -446,6 +447,32 @@ conn_flush(cbl_conn *conn)
 }
 
 /*
+ * A control-lane frame, where the transport has lanes, goes ahead of
+ * every other frame not yet begun, behind the control frames queued
+ * before it: their order is kept, and nothing else holds them.
+ * conn->mtx held.
+ */
+static void
+txq_insert(cbl_conn *conn, struct cbl_txent *e)
+{
+	struct cbl_txent *at, *prev = NULL;
+
+	if (!e->control) {
+		STAILQ_INSERT_TAIL(&conn->txq, e, link);
+		return;
+	}
+	STAILQ_FOREACH(at, &conn->txq, link) {
+		if (!at->control && at->off == 0)
+			break;
+		prev = at;
+	}
+	if (prev == NULL)
+		STAILQ_INSERT_HEAD(&conn->txq, e, link);
+	else
+		STAILQ_INSERT_AFTER(&conn->txq, prev, e, link);
+}
+
+/*
  * Queue an encoded frame.  Consumes "msg" in all cases.  May be called
  * from any thread.  "ctl" frames (ACK, ERROR, DONE, stream control) end
  * something the peer waits for: they are queued beyond sendq_bytes, since
@@ -470,6 +497,7 @@ conn_enqueue(cbl_conn *conn, cbl_msg *msg, bool ctl)
 		return (ENOMEM);
 	}
 	e->msg = msg;
+	e->control = msg->control && conn->ops->lanes;
 	pthread_mutex_lock(&conn->mtx);
 	if (conn->state == CBL_CS_CLOSED || conn->state == CBL_CS_CLOSING) {
 		pthread_mutex_unlock(&conn->mtx);
@@ -495,7 +523,7 @@ conn_enqueue(cbl_conn *conn, cbl_msg *msg, bool ctl)
 		free(e);
 		return (ENOBUFS);
 	}
-	STAILQ_INSERT_TAIL(&conn->txq, e, link);
+	txq_insert(conn, e);
 	conn->txq_bytes += msg->len;
 	conn->txq_frames++;
 	pthread_mutex_unlock(&conn->mtx);

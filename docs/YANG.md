@@ -188,7 +188,9 @@ The YANG family (family 1, WIRE-FORMAT.md section 7.6) serves a
 program's modules in CORECONF's shape: GET, EDIT (create, replace,
 delete; all or nothing), RPC, NOTIFY, GET-SID, and SUBSCRIBE: RFC
 8639's dynamic subscriptions and RFC 8641's YANG-Push, periodic and
-on-change (changes as a YANG Patch), on a push stream. Configured
+on-change (changes as a YANG Patch), on a push stream; an event
+stream's (the NETCONF stream) on the control lane, ahead of bulk
+traffic over SCTP (TRANSPORTS.md section 3.4). Configured
 subscriptions (RFC 8639 section 2.5, the `configured` feature) are the
 entries of running's `subscriptions` list, which the program keeps and
 tells `cbl_ysub_configure()` whenever it changes (from its edit handler

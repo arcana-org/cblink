@@ -2077,9 +2077,12 @@ cbl_ysub_open(cbl_req *req, const cbl_msg *msg, cbl_stream *s,
 			rev = revbuf;
 		}
 	}
+	/* An event stream's notifications on the control lane, ahead of
+	 * bulk (a dump, a datastore's push-update) on the connection. */
 	if (error != 0 ||
 	    (error = sub_accept_msg(req, sub, rev, &acc)) != 0 ||
-	    (error = cbl_stream_accept(s, acc, 0, &sub_cbs, sub)) != 0) {
+	    (error = cbl_stream_accept(s, acc, sub->stream != NULL ?
+	    CBL_SF_CONTROL : 0, &sub_cbs, sub)) != 0) {
 		/* Not accepted: no callback will run, sub still ours. */
 		for (size_t i = 0; i < r.n; i++)
 			free(r.v[i].p);

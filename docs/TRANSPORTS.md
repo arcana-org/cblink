@@ -69,7 +69,10 @@ association is one `cbl_conn`.
   message is treated as an error, never as a short write.
 - **Multiple streams.**
   - SCTP stream 0 carries requests, responses, dumps and notifications.
-  - cblink stream *n* is sent on SCTP stream `1 + n mod (os − 1)`, where
+  - SCTP stream 1 is the control lane: the notifications of a group
+    flagged `CBL_MCF_CONTROL` and the frames of a stream opened or
+    accepted with `CBL_SF_CONTROL` (section 3.4).
+  - cblink stream *n* is sent on SCTP stream `2 + n mod (os − 2)`, where
     *os* is the number of outbound streams negotiated (cblink asks for 64).
   - A slow or large cblink stream therefore does not hold up control
     traffic or other cblink streams.
@@ -136,6 +139,42 @@ association is one `cbl_conn`.
 SCTP is in the GENERIC kernel, or available as the `sctp` module. The tests
 skip SCTP cases when an SCTP socket cannot be created. The multihoming
 test also needs `::1` on `lo0`.
+
+### 3.4 The control lane
+
+Events that say something changed (a path chosen anew, a link down) must
+not wait behind a bulk transfer on the same association: a large dump, a
+big reply, a datastore's push-update. The control lane keeps them apart.
+
+- **What goes on it.** A family's multicast group flagged
+  `CBL_MCF_CONTROL` puts its notifications there. A stream opened or
+  accepted with `CBL_SF_CONTROL` puts every frame its end sends there,
+  from the open or the accept on. The YANG family accepts every event
+  stream subscription (the NETCONF stream, RFC 8639) so; a datastore's
+  (YANG-Push) stays on its own SCTP stream as any cblink stream.
+- **What it does.** A control-lane frame is queued ahead of every frame
+  not yet begun, behind the control-lane frames queued before it, and is
+  sent on SCTP stream 1. The order within the lane is kept; there is
+  none between the lane and the rest. The SCTP stream scheduler
+  (`net.inet.sctp.default_ss_module`, round robin by default) then
+  takes it in turn with the bulk stream, and with I-DATA a large
+  message's fragments interleave with it.
+- **What it does not.** The receive side is one socket: a peer whose
+  socket buffer is full of bulk it has not read yet gets the lane's
+  frames after that, so the lane is as late as the receiver's buffer
+  (`SO_RCVBUF`) at the rate it reads.
+- **The bound.** `lane_test` sends 40 notifications 5 ms apart while a
+  dump fills the association, its reader taking 64 KiB a millisecond
+  (64 MB/s) through a 256 KiB socket buffer: on SCTP stream 0 they come
+  203 ms late, as late as the dump queued ahead of them; on the lane 4
+  ms (under 6 ms), what the receiver's buffer holds. A stream's data
+  that shared the sender's queue with the dump came 75 ms late before.
+- **TCP, TLS, AF_UNIX.** One byte stream: the flags change nothing,
+  frames go out in the order they were queued, and a notification waits
+  behind the bulk queued before it (head-of-line blocking stays).
+- The lane is the sender's choice and is not on the wire: `get-family`
+  does not report `CBL_MCF_CONTROL`, and a receiver needs nothing to
+  take the lane's frames.
 
 ## 4. Choosing a transport
 

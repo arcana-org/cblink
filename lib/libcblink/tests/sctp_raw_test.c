@@ -13,7 +13,7 @@
 
 #include "cbl_net_test.h"
 
-enum { S_ECHO = 1, S_FEED };
+enum { S_ECHO = 1, S_FEED, S_CFEED };
 
 #define	FEED_ITEMS	3
 #define	SMALL_MAX	(256 * 1024)	/* the server's max_frame */
@@ -41,13 +41,15 @@ static const struct cbl_stream_cbs sfeed_cbs = {
 };
 
 static int
-sfeed(cbl_req *req __unused, const cbl_msg *msg __unused, cbl_stream *s,
+sfeed(cbl_req *req __unused, const cbl_msg *msg, cbl_stream *s,
     void *arg __unused)
 {
 	cbl_msg *m;
 	int error;
 
-	if ((error = cbl_stream_accept(s, NULL, 0, &sfeed_cbs, NULL)) != 0)
+	if ((error = cbl_stream_accept(s, NULL,
+	    cbl_msg_cmd(msg) == S_CFEED ? CBL_SF_CONTROL : 0,
+	    &sfeed_cbs, NULL)) != 0)
 		return (error);
 	for (int i = 0; i < FEED_ITEMS; i++) {
 		ATF_REQUIRE_EQ(0, cbl_stream_msg_new(s, &m));
@@ -60,6 +62,8 @@ sfeed(cbl_req *req __unused, const cbl_msg *msg __unused, cbl_stream *s,
 static const struct cbl_op s_ops[] = {
 	{ .cmd = S_ECHO, .name = "echo", .flags = CBL_OPF_DO, .doit = secho },
 	{ .cmd = S_FEED, .name = "feed", .flags = CBL_OPF_PUSH,
+	  .stream_open = sfeed },
+	{ .cmd = S_CFEED, .name = "cfeed", .flags = CBL_OPF_PUSH,
 	  .stream_open = sfeed },
 };
 static const struct cbl_family_def s_def = {
@@ -227,8 +231,8 @@ ATF_TC_BODY(stream_mapping, tc)
 	memset(&st, 0, sizeof(st));
 	ATF_REQUIRE(getsockopt(fd, IPPROTO_SCTP, SCTP_STATUS, &st,
 	    &slen) == 0);
-	ATF_REQUIRE(st.sstat_instrms >= 2);
-	want = (uint16_t)(1 + 1 % (st.sstat_instrms - 1));
+	ATF_REQUIRE(st.sstat_instrms >= 3);
+	want = (uint16_t)(2 + 1 % (st.sstat_instrms - 2));
 
 	/* Requests and responses use SCTP stream 0. */
 	len = mkframe(buf, sizeof(buf), fam, S_ECHO, CBL_F_REQUEST, 1, 0,
@@ -239,24 +243,31 @@ ATF_TC_BODY(stream_mapping, tc)
 	ATF_REQUIRE_EQ(1, cbl_msg_seq(m));
 	cbl_msg_free(m);
 
-	/* cblink stream 1 travels on its own SCTP stream. */
-	len = mkframe(buf, sizeof(buf), fam, S_FEED,
-	    CBL_F_REQUEST | CBL_F_S_OPEN, 2, 1, "A0");
-	ssend(fd, buf, len, 0);
-	for (;;) {
-		m = srecv(f.ctx, fd, &sid);
-		ATF_REQUIRE_EQ(1, cbl_msg_stream(m));
-		ATF_REQUIRE_EQ_MSG(want, sid, "frame flags %#x on sid %u",
-		    cbl_msg_flags(m), sid);
-		if ((cbl_msg_flags(m) & CBL_F_S_DATA) != 0)
-			data++;
-		if ((cbl_msg_flags(m) & CBL_F_S_HCLOSE) != 0) {
+	/*
+	 * cblink stream 1 travels on its own SCTP stream; stream 3, a
+	 * control one, on the control lane's, SCTP stream 1.
+	 */
+	for (uint32_t id = 1; id <= 3; id += 2) {
+		len = mkframe(buf, sizeof(buf), fam, id == 1 ? S_FEED :
+		    S_CFEED, CBL_F_REQUEST | CBL_F_S_OPEN, 1 + id, id, "A0");
+		ssend(fd, buf, len, 0);
+		data = 0;
+		for (;;) {
+			m = srecv(f.ctx, fd, &sid);
+			ATF_REQUIRE_EQ(id, cbl_msg_stream(m));
+			ATF_REQUIRE_EQ_MSG(id == 1 ? want : 1, sid,
+			    "frame flags %#x on sid %u", cbl_msg_flags(m),
+			    sid);
+			if ((cbl_msg_flags(m) & CBL_F_S_DATA) != 0)
+				data++;
+			if ((cbl_msg_flags(m) & CBL_F_S_HCLOSE) != 0) {
+				cbl_msg_free(m);
+				break;
+			}
 			cbl_msg_free(m);
-			break;
 		}
-		cbl_msg_free(m);
+		ATF_REQUIRE_EQ(FEED_ITEMS, data);
 	}
-	ATF_REQUIRE_EQ(FEED_ITEMS, data);
 	close(fd);
 	sfx_stop(&f);
 }

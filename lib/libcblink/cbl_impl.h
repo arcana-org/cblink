@@ -436,6 +436,7 @@ struct cbl_msg {
 	bool			 decoded;	/* received: read only */
 	bool			 finalized;
 	bool			 has_user;	/* cbl_msg_set_user()'s */
+	bool			 control;	/* on the control lane */
 	uint32_t		 window;	/* stream window, 0: default */
 	int			 error;		/* sticky */
 	const char		*errstr;
@@ -639,6 +640,8 @@ struct cbl_tr_ops {
 	int	(*rx_frames)(cbl_conn *, int budget);
 	/* A frame starts on the next write (SCTP: choose its stream). */
 	void	(*frame_start)(cbl_conn *, const void *frame, size_t len);
+	/* Control-lane frames go ahead of the queue (SCTP: a stream). */
+	bool	 lanes;
 	/* Transport timer (DTLS over SCTP): ms until due, or -1. */
 	int	(*timeout)(cbl_conn *);
 	void	(*on_timeout)(cbl_conn *);
@@ -664,7 +667,7 @@ struct cbl_sctp_mux;
 struct cbl_sctp_mux *cbl_sctp_mux_new(void);
 void	cbl_sctp_mux_free(struct cbl_sctp_mux *m);
 uint16_t cbl_sctp_mux_sid(struct cbl_sctp_mux *m, int fd, const void *frame,
-	    size_t len);
+	    size_t len, bool control);
 int	cbl_sctp_mux_bytes(cbl_conn *conn, struct cbl_sctp_mux *m, uint16_t sid,
 	    const void *data, size_t n);
 
@@ -683,6 +686,7 @@ struct cbl_txent {
 	STAILQ_ENTRY(cbl_txent)	 link;
 	cbl_msg			*msg;
 	size_t			 off;
+	bool			 control;	/* queued ahead of the rest */
 };
 
 /* Outstanding request issued by this endpoint. */
@@ -766,6 +770,7 @@ struct cbl_conn {
 	STAILQ_HEAD(, cbl_txent)	 txq;
 	size_t				 txq_bytes;
 	size_t				 txq_frames;
+	bool				 tx_control;	/* the frame being written */
 
 	/* Requests issued by this endpoint. */
 	uint32_t			 next_seq;

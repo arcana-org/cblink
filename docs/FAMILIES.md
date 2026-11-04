@@ -15,7 +15,7 @@ family.
 | name | `[a-z][a-z0-9_.-]{0,62}`, unique on an endpoint. `ctrl` and names starting with `cblink.` are reserved. |
 | version | A number reported to clients (`ctrl get-family`). It is the family's own; cblink does not interpret it. |
 | operations | Commands `1 … 65535`. Each supports any of: `do` (request and reply), `dump` (request and a series of items), opening a stream, or a notification. `auth` restricts it to authenticated peers. |
-| multicast groups | Named groups that notifications are sent to. A group can require an authenticated subscriber. |
+| multicast groups | Named groups that notifications are sent to. A group can require an authenticated subscriber (`CBL_MCF_AUTH`), and can have its notifications sent on the control lane (`CBL_MCF_CONTROL`: over SCTP ahead of bulk traffic, TRANSPORTS.md section 3.4). |
 | streams | Long-lived channels opened through an operation (STREAMS.md). |
 
 Three families are the library's: `ctrl` (id 0, section 4), the YANG

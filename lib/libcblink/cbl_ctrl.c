@@ -104,7 +104,9 @@ fname(otype *o, const cbl_family *fam, cbl_yarena *a)			\
 	for (uint32_t i = 0; i < def->nmcgrps; i++) {			\
 		grps[i].id = fam->group_base + i;			\
 		grps[i].name = def->mcgrps[i].name;			\
-		grps[i].flags = flags_bits(def->mcgrps[i].flags, bits);	\
+		/* The lane is the sender's own: not told. */		\
+		grps[i].flags = flags_bits(def->mcgrps[i].flags &	\
+		    ~CBL_MCF_CONTROL, bits);				\
 		bits += 4;						\
 	}								\
 	o->has_id = true;						\
