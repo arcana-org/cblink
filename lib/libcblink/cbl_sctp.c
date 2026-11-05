@@ -515,6 +515,7 @@ cbl_sctp_connect(cbl_conn *conn, cbl_tls *tls, uint64_t deadline)
 {
 	char packed[CBL_URI_MAXADDR * sizeof(struct sockaddr_storage)];
 	struct pollfd pfd;
+	socklen_t len = sizeof(int);
 	size_t off = 0;
 	int fd, error, timeout;
 
@@ -547,6 +548,18 @@ cbl_sctp_connect(cbl_conn *conn, cbl_tls *tls, uint64_t deadline)
 		conn->fd = -1;
 		return (cbl_conn_seterr(conn, ETIMEDOUT,
 		    "sctp connect: timed out"));
+	}
+	/* An ABORT (nothing listening) also wakes poll(2). */
+	error = 0;
+	if ((conn->flags & CBL_CF_NONBLOCK) == 0 &&
+	    (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) == -1 ||
+	    error != 0)) {
+		if (error == 0)
+			error = errno;
+		close(fd);
+		conn->fd = -1;
+		return (cbl_conn_seterr(conn, error, "sctp connect: %s",
+		    strerror(error)));
 	}
 	if (tls != NULL)
 		return (cbl_dtls_sctp_attach(conn, tls, false));

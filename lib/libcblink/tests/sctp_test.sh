@@ -142,9 +142,40 @@ dtls_cleanup()
 	stop_server
 }
 
+atf_test_case dtls_closed cleanup
+dtls_closed_head()
+{
+	atf_set "descr" "A peer that closes during the DTLS handshake, or is" \
+	    "not there, is named as such, not by OpenSSL's stale errno"
+	atf_set "require.progs" "${OPENSSL}"
+}
+dtls_closed_body()
+{
+	sctp_available
+	${PEER} features | grep -q '^dtls-sctp$' ||
+	    atf_skip "libcblink was built with an OpenSSL without SCTP"
+	mkcerts
+	start_slam -S
+	for i in 1 2 3; do
+		atf_check -s exit:1 -e match:"TLS handshake: (the peer closed \
+the connection|Connection reset)" -e not-match:"system library|routines" \
+		    ${PEER} call -c client.crt -k client.key -a ca.crt \
+		    sctp://127.0.0.1:${port}
+	done
+	stop_server
+	atf_check -s exit:1 -e match:"sctp connect: Connection refused" \
+	    ${PEER} call -c client.crt -k client.key -a ca.crt \
+	    sctp://127.0.0.1:${port}
+}
+dtls_closed_cleanup()
+{
+	stop_server
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case plain
 	atf_add_test_case multihome
 	atf_add_test_case dtls
+	atf_add_test_case dtls_closed
 }

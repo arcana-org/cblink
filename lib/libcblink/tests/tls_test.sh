@@ -368,6 +368,29 @@ crl_chain_cleanup()
 	stop_server
 }
 
+atf_test_case closed cleanup
+closed_head()
+{
+	atf_set "descr" "A peer that closes during the handshake is named" \
+	    "as such, not by OpenSSL's stale errno"
+	atf_set "require.progs" "${OPENSSL}"
+}
+closed_body()
+{
+	mkcerts
+	start_slam
+	for i in 1 2 3; do
+		atf_check -s exit:1 -e match:"TLS handshake: (the peer closed \
+the connection|Connection reset)" -e not-match:"system library|routines" \
+		    $PEER call -c client.crt -k client.key -a ca.crt \
+		    tcp://127.0.0.1:${port}
+	done
+}
+closed_cleanup()
+{
+	stop_server
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case mtls
@@ -377,4 +400,5 @@ atf_init_test_cases()
 	atf_add_test_case plaintext
 	atf_add_test_case proxy
 	atf_add_test_case crl_chain
+	atf_add_test_case closed
 }

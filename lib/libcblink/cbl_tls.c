@@ -482,13 +482,66 @@ struct tls_tr {
 	unsigned char *chunk;
 };
 
+/*
+ * The socket's error once the peer went away, or 0 for an EOF.  OpenSSL
+ * queues errno as a system error even where none was set (a read of 0
+ * bytes), so only an error a socket gives is believed.
+ */
+static int
+peer_gone(cbl_conn *conn, int e)
+{
+	socklen_t len = sizeof(int);
+	int soerr = 0;
+
+	if (getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0 &&
+	    soerr != 0)
+		return (soerr);
+	switch (e) {
+	case ECONNABORTED:
+	case ECONNREFUSED:
+	case ECONNRESET:
+	case EHOSTDOWN:
+	case EHOSTUNREACH:
+	case ENETDOWN:
+	case ENETUNREACH:
+	case ENOTCONN:
+	case EPIPE:
+	case ETIMEDOUT:
+		return (e);
+	default:
+		return (0);
+	}
+}
+
+/*
+ * Whether the failure was the peer going away: an EOF, or the SCTP BIO
+ * failing its SCTP-AUTH check on an association already gone.
+ */
+static bool
+peer_eof(cbl_conn *conn, unsigned long qe, int se)
+{
+	struct sockaddr_storage ss;
+	socklen_t len = sizeof(ss);
+
+	if (qe == 0)
+		return (se == SSL_ERROR_SYSCALL);
+	if (ERR_GET_LIB(qe) == ERR_LIB_SSL)
+		return (ERR_GET_REASON(qe) ==
+		    SSL_R_UNEXPECTED_EOF_WHILE_READING);
+	return (ERR_GET_LIB(qe) == ERR_LIB_BIO &&
+	    ERR_GET_REASON(qe) == BIO_R_CONNECT_ERROR &&
+	    getpeername(conn->fd, (struct sockaddr *)&ss, &len) == -1);
+}
+
 static int
 want_from(cbl_conn *conn, int rv, const char *what)
 {
 	struct tls_tr *t = conn->trpriv;
+	unsigned long qe;
 	long vr;
+	int e = errno, se;
 
-	switch (SSL_get_error(t->ssl, rv)) {
+	switch ((se = SSL_get_error(t->ssl, rv))) {
 	case SSL_ERROR_WANT_READ:
 		conn->want = CBL_EV_READ;
 		return (EAGAIN);
@@ -498,14 +551,6 @@ want_from(cbl_conn *conn, int rv, const char *what)
 	case SSL_ERROR_ZERO_RETURN:
 		ERR_clear_error();
 		return (ECONNRESET);
-	case SSL_ERROR_SYSCALL:
-		if (ERR_peek_error() == 0) {
-			int e = errno != 0 ? errno : ECONNRESET;
-
-			cbl_conn_seterr(conn, e, "%s: %s", what, strerror(e));
-			return (e);
-		}
-		/* FALLTHROUGH */
 	default:
 		vr = SSL_get_verify_result(t->ssl);
 		if (vr != X509_V_OK) {
@@ -515,8 +560,21 @@ want_from(cbl_conn *conn, int rv, const char *what)
 			ERR_clear_error();
 			return (EAUTH);
 		}
-		ssl_errstr(conn->errstr, sizeof(conn->errstr), what);
-		return (EPROTO);
+		/* The peer closed or reset: say that, not a stale errno. */
+		qe = ERR_peek_last_error();
+		if (qe != 0 && ERR_GET_LIB(qe) == ERR_LIB_SYS)
+			e = ERR_GET_REASON(qe);
+		else if (!peer_eof(conn, qe, se)) {
+			ssl_errstr(conn->errstr, sizeof(conn->errstr), what);
+			return (EPROTO);
+		}
+		ERR_clear_error();
+		if ((e = peer_gone(conn, e)) != 0)
+			return (cbl_conn_seterr(conn, e, "%s: %s", what,
+			    strerror(e)));
+		return (cbl_conn_seterr(conn, ECONNRESET, "%s: the peer closed "
+		    "the connection%s", what, SSL_is_init_finished(t->ssl) ?
+		    "" : " (is a server listening there?)"));
 	}
 }
 
@@ -542,6 +600,7 @@ tls_handshake(cbl_conn *conn)
 		t->tcp_pending = false;
 	}
 	ERR_clear_error();
+	errno = 0;
 	if ((rv = SSL_do_handshake(t->ssl)) != 1)
 		return (want_from(conn, rv, "TLS handshake"));
 	conn->want = 0;
@@ -563,6 +622,7 @@ tls_read(cbl_conn *conn, void *buf, size_t len, size_t *got)
 	int rv, error;
 
 	ERR_clear_error();
+	errno = 0;
 	if ((rv = SSL_read_ex(t->ssl, buf, len, got)) == 1)
 		return (0);
 	error = want_from(conn, rv, "TLS read");
@@ -580,6 +640,7 @@ tls_write(cbl_conn *conn, const void *buf, size_t len, size_t *put)
 	int rv;
 
 	ERR_clear_error();
+	errno = 0;
 	if ((rv = SSL_write_ex(t->ssl, buf, len, put)) == 1)
 		return (0);
 	return (want_from(conn, rv, "TLS write"));

@@ -18,6 +18,9 @@
  *   cbl_testpeer relay [-1] [-d pidfile] port
  *	A TCP proxy to 127.0.0.1:port that sends a PROXY header (version 2,
  *	or 1 with -1) naming 192.0.2.7:4321 as the client.
+ *   cbl_testpeer slam [-S] [-d pidfile]
+ *	Listen on 127.0.0.1 (TCP, or SCTP with -S) and close each
+ *	connection as soon as it is accepted.
  */
 
 #include <sys/param.h>
@@ -281,6 +284,7 @@ usage(void)
 	    "       cbl_testpeer call [-p] [-c cert -k key -a ca] [-n name]\n"
 	    "           [-o op] [-N n] [-B bytes] uri\n"
 	    "       cbl_testpeer relay [-1] [-d pidfile] port\n"
+	    "       cbl_testpeer slam [-S] [-d pidfile]\n"
 	    "       cbl_testpeer features\n");
 	exit(2);
 }
@@ -806,6 +810,50 @@ relay(int argc, char **argv)
 	}
 }
 
+/* A listener that closes every connection at once. */
+static int
+slam(int argc, char **argv)
+{
+	struct sockaddr_in sin = { .sin_len = sizeof(sin),
+	    .sin_family = AF_INET };
+	socklen_t len = sizeof(sin);
+	const char *pidfile = NULL;
+	int ch, lfd, cfd, proto = IPPROTO_TCP, readyfd = -1;
+
+	while ((ch = getopt(argc, argv, "d:S")) != -1) {
+		switch (ch) {
+		case 'd': pidfile = optarg; break;
+		case 'S': proto = IPPROTO_SCTP; break;
+		default: usage();
+		}
+	}
+	if (argc != optind)
+		usage();
+	if (pidfile != NULL)
+		readyfd = detach(pidfile);
+	sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if ((lfd = socket(AF_INET, SOCK_STREAM, proto)) == -1 ||
+	    bind(lfd, (struct sockaddr *)&sin, sizeof(sin)) == -1 ||
+	    listen(lfd, 16) == -1 ||
+	    getsockname(lfd, (struct sockaddr *)&sin, &len) == -1)
+		err(1, "slam");
+	if (readyfd != -1) {
+		dprintf(readyfd, "ready %u\n", ntohs(sin.sin_port));
+		close(readyfd);
+	} else {
+		printf("ready %u\n", ntohs(sin.sin_port));
+		fflush(stdout);
+	}
+	for (;;) {
+		if ((cfd = accept(lfd, NULL, NULL)) == -1) {
+			if (errno == EINTR)
+				continue;
+			err(1, "accept");
+		}
+		close(cfd);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -818,6 +866,8 @@ main(int argc, char **argv)
 		return (call(argc - 1, argv + 1));
 	if (strcmp(argv[1], "relay") == 0)
 		return (relay(argc - 1, argv + 1));
+	if (strcmp(argv[1], "slam") == 0)
+		return (slam(argc - 1, argv + 1));
 	if (strcmp(argv[1], "features") == 0) {
 		/* One per line, for the shell tests to grep. */
 		if ((cbl_features() & CBL_FEAT_DTLS_SCTP) != 0)

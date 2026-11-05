@@ -18,6 +18,15 @@ start_server()
 	port=$(awk '/^ready/ { print $2 }' server.out)
 }
 
+# A listener that closes each connection at once ("slam" -S: SCTP);
+# stop_server stops it.  Sets $port.
+start_slam()
+{
+	"${PEER}" slam -d server.pid "$@" > server.out 2> server.err ||
+	    atf_fail "slam did not start: $(cat server.err)"
+	port=$(awk '/^ready/ { print $2 }' server.out)
+}
+
 stop_server()
 {
 	[ -s server.pid ] && kill "$(cat server.pid)" 2>/dev/null
