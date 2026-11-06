@@ -149,36 +149,42 @@ has(const struct cbl_ynode *n, const void *p)
 
 /*
  * Patterns: each table's ERE compiled once, kept for the process; the
- * tables are static, so their strings' addresses are their keys.
+ * tables are static, so their strings' addresses are their keys.  Each
+ * on its own allocation: another thread's growing the list moves the
+ * list, not a regex_t one is matching with.
  */
 static pthread_mutex_t	pat_mtx = PTHREAD_MUTEX_INITIALIZER;
-static struct {
+static struct pat {
 	const char	*ere;
 	regex_t		 re;
 	bool		 ok;
-}			*pats;
+}			**pats;
 static size_t		 npats;
 
 static const regex_t *
 pattern(const char *ere)
 {
 	const regex_t *re = NULL;
+	struct pat *p;
 	void *nv;
 	size_t i;
 
 	pthread_mutex_lock(&pat_mtx);
-	for (i = 0; i < npats && pats[i].ere != ere; i++)
+	for (i = 0; i < npats && pats[i]->ere != ere; i++)
 		;
-	if (i == npats && (nv = reallocarray(pats, npats + 1,
-	    sizeof(*pats))) != NULL) {
-		pats = nv;
-		pats[npats].ere = ere;
-		pats[npats].ok = cbl_pattern_compile_ere(ere,
-		    &pats[npats].re) == 0;
-		npats++;
+	if (i == npats && (p = calloc(1, sizeof(*p))) != NULL) {
+		if ((nv = reallocarray(pats, npats + 1, sizeof(*pats))) ==
+		    NULL)
+			free(p);
+		else {
+			pats = nv;
+			p->ere = ere;
+			p->ok = cbl_pattern_compile_ere(ere, &p->re) == 0;
+			pats[npats++] = p;
+		}
 	}
-	if (i < npats && pats[i].ok)
-		re = &pats[i].re;
+	if (i < npats && pats[i]->ok)
+		re = &pats[i]->re;
 	pthread_mutex_unlock(&pat_mtx);
 	return (re);
 }
