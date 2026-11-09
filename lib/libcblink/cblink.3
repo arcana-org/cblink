@@ -3,7 +3,7 @@
 .\"
 .\" Copyright (c) 2026 Pouria Mousavizadeh Tehrani <pouria@FreeBSD.org>
 .\"
-.Dd November 4, 2026
+.Dd November 10, 2026
 .Dt CBLINK 3
 .Os
 .Sh NAME
@@ -15,6 +15,7 @@ cblink Library
 .Sh SYNOPSIS
 .In cblink.h
 .In cbl_schema.h
+.In cbl_yxlate.h
 .Pp
 Link with
 .Fl lcblink ,
@@ -541,6 +542,70 @@ binary base64, empty
 .Li [null] ;
 an instance-identifier, anydata and anyxml are
 .Li null .
+.Ss JSON and YANG-CBOR by a peer's SIDs
+.In cbl_yxlate.h
+translates between RFC 7951's JSON and YANG-CBOR for a program that
+relays a peer's data without that peer's structs, as a RESTCONF front
+end does: names come from the peer's
+.Pa .sid
+files
+.Pq RFC 9595 ,
+types from the program's own tables where they have the node of the
+same schema-node path, whatever SID either side gives it.
+.Fn cbl_ysids_new
+starts a
+.Vt struct cbl_ysids
+over the tables;
+.Fn cbl_ysids_file_cbor
+adds a
+.Pa .sid
+file as GET-SID sends it,
+.Fn cbl_ysids_file_json
+one in JSON,
+.Fn cbl_ysids_tables
+the tables' own numbering,
+.Fn cbl_ysids_module
+and
+.Fn cbl_ysids_set_content_id
+what the peer's YANG library
+.Pq RFC 8525
+says;
+.Fn cbl_ysids_done
+sorts and resolves them, after which the set is read-only and may be
+shared between threads.
+.Fn cbl_ysids_sid ,
+.Fn cbl_ysids_data ,
+.Fn cbl_ysids_named
+and
+.Fn cbl_ysids_of
+find an item by SID, by schema-node path, by module and name, and by
+the local node, identity or annotation it resolved to.
+.Fn cbl_yxlate_json
+writes a map of top-level nodes keyed by SID as one JSON object,
+annotations as RFC 7952 section 5.2 has them;
+.Fn cbl_yxlate_json_member
+one top-level node's value as a member.
+.Fn cbl_yxlate_cbor
+reads a JSON text, an object of top-level nodes, into such a map, and
+.Fn cbl_yxlate_cbor_member
+one node's value; a refusal gives RFC 8040's error-tag
+.Po
+.Ql malformed-message
+for what is not JSON,
+.Ql unknown-element ,
+.Ql unknown-namespace ,
+.Ql invalid-value
+.Pc .
+.Fn cbl_yxlate_iid
+writes an instance-identifier's XPath as YANG-CBOR's SID or
+.Li [SID, keys...] .
+The JSON reader is strict: one value, UTF-8, no member twice, no NUL
+in a string, at most 128 levels deep.
+.Vt struct cbl_ycrd
+.Pq Fn cbl_ycrd_head , Fn cbl_ycrd_peek , Fn cbl_ycrd_text , Fn cbl_ycrd_skip
+reads CBOR of definite lengths and
+.Fn cbl_ybuf_head
+writes a head, for what a caller wraps around the translated values.
 .Sh LIMITS
 Every limit has a default, a minimum and a maximum, and applies per
 context, listener or connection

@@ -2,7 +2,7 @@
 
 LIB=		cblink
 SHLIB_MAJOR=	2
-INCS=		cblink.h cbl_schema.h cbl_data.h
+INCS=		cblink.h cbl_schema.h cbl_data.h cbl_yxlate.h
 MAN=		cblink.3
 
 SRCS=		cbl_arena.c \
@@ -22,6 +22,7 @@ SRCS=		cbl_arena.c \
 		cbl_family.c \
 		cbl_frame.c \
 		cbl_fw.c \
+		cbl_json.c \
 		cbl_loop.c \
 		cbl_msg.c \
 		cbl_notify.c \
@@ -45,7 +46,9 @@ SRCS=		cbl_arena.c \
 		cbl_yds.c \
 		cbl_yjson.c \
 		cbl_yvalid.c \
-		cbl_ymod_schema.c
+		cbl_ymod_schema.c \
+		cbl_ysid.c \
+		cbl_yxlate.c
 
 # libcblink_pic.a too, of the shared library's objects: for a program
 # that is built on one host and shipped to others whose libcblink may be

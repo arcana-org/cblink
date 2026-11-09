@@ -171,6 +171,24 @@ rules.h: ${.CURDIR}/yang/rules@2026-10-13.yang \
 	    -s ${.CURDIR}/yang/rules@2026-10-13.sid \
 	    ${.CURDIR}/yang/rules@2026-10-13.yang > /dev/null
 rules_schema.c: rules.h
+# yxlate_test: the translator between RFC 7951's JSON and YANG-CBOR by a
+# peer's .sid files, over RFC 7951's and RFC 7952's example modules
+# (yang/yxlate); the files read and renumbered with base's libucl.
+ATF_TESTS_C+=	yxlate_test
+SRCS.yxlate_test=	yxtest.h yxlate_test.c yxtest_schema.c
+CFLAGS.yxlate_test+=	-I${.OBJDIR} -I${LIBCBLINK_SRC} -I/usr/include/private/ucl
+LDADD.yxlate_test+=	-L${LIBCBLINK_OBJ} -lcblink -lpthread -lprivateucl
+CFLAGS.yxtest_schema.c+=	-I${.OBJDIR} -I${LIBCBLINK_SRC}
+YXDIR=		${.CURDIR}/yang/yxlate
+YX_MODS=	example-foomod@2026-11-05 example-barmod@2026-11-05 \
+		example-last-modified@2026-11-05
+CLEANFILES+=	yxtest.h yxtest_schema.c
+yxtest.h: ${YX_MODS:@m@${YXDIR}/${m}.yang ${YXDIR}/${m}.sid@} ${GEN}
+	${GEN} -m h,schema -b yxtest -o ${.OBJDIR} -p ${.CURDIR}/corpus \
+	    ${YX_MODS:@m@-s ${YXDIR}/${m}.sid@} \
+	    -s ${YXDIR}/ietf-yang-types@2025-12-22.sid \
+	    ${YX_MODS:@m@${YXDIR}/${m}.yang@} > /dev/null
+yxtest_schema.c: yxtest.h
 CLEANFILES+=	yangh.h yangh_schema.c ietf-system.sid
 yangh.h: ${YANGH_SRC} ${GEN}
 	cat ${.CURDIR}/yang/ietf-system@2014-08-06.sid > ${.OBJDIR}/ietf-system.sid
@@ -185,7 +203,7 @@ yangh_schema.c: yangh.h
 ${PACKAGE}FILES+=	${GEN}
 ${PACKAGE}FILESMODE_${GEN}= 0555
 
-FILESGROUPS+=	CTRL CBLMK YANG CORPUS FILL
+FILESGROUPS+=	CTRL CBLMK YANG CORPUS FILL YXLATE
 CTRL=		${LIBCBLINK_SRC}/cbl_yctrl.h \
 		${LIBCBLINK_SRC}/cbl_yctrl_schema.c \
 		${LIBCBLINK_SRC}/cbl_ymod.h \
@@ -237,8 +255,11 @@ CORPUS!=	cd ${.CURDIR} && echo corpus/*.yang corpus/README.md
 CORPUSDIR=	${TESTSDIR}/corpus
 FILL=		yfill.c yfill.h xpdiff.c
 FILLDIR=	${TESTSDIR}
+# yxlate_test's .sid files, read as a peer's.
+YXLATE=		${YX_MODS:@m@${YXDIR}/${m}.sid@}
+YXLATEDIR=	${TESTSDIR}/yxlate
 
-.for g in CTRL CBLMK YANG CORPUS FILL
+.for g in CTRL CBLMK YANG CORPUS FILL YXLATE
 ${g}PACKAGE=	${PACKAGE}
 .endfor
 

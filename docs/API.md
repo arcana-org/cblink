@@ -618,6 +618,48 @@ void	cbl_xval_free(struct cbl_xval *);
   defines: `node_get()` and `node_edit()` per top-level data node,
   `rpc_rpc()`, `action_action()`.
 
+`<cbl_yxlate.h>`, JSON and YANG-CBOR by a peer's SIDs: for a program
+that relays a peer's data without its structs (a RESTCONF front end),
+names from the peer's `.sid` files, types from the program's own tables
+where they have the node of the same schema-node path, whatever SID
+either side gives it.
+
+```c
+/* a peer's items (RFC 9595), resolved to the local tables' */
+struct cbl_ysids *cbl_ysids_new(const struct cbl_yschema *);
+void	cbl_ysids_free(struct cbl_ysids *);
+int	cbl_ysids_file_cbor(struct cbl_ysids *, const void *, size_t, char *why, size_t whylen);
+int	cbl_ysids_file_json(struct cbl_ysids *, const char *, size_t, char *why, size_t whylen);
+int	cbl_ysids_tables(struct cbl_ysids *);	/* the local numbering */
+void	cbl_ysids_skip(struct cbl_ysids *, bool (*)(const struct cbl_ymodule *));
+int	cbl_ysids_module(struct cbl_ysids *, const char *name, const char *rev, bool impl);
+int	cbl_ysids_set_content_id(struct cbl_ysids *, const char *);
+int	cbl_ysids_done(struct cbl_ysids *, char *why, size_t whylen);	/* read-only after */
+const struct cbl_ysid_item *cbl_ysids_sid(const struct cbl_ysids *, uint64_t),
+    *cbl_ysids_data(const struct cbl_ysids *, const char *path),
+    *cbl_ysids_named(const struct cbl_ysids *, int ns, const char *mod, const char *name),
+    *cbl_ysids_of(const struct cbl_ysids *, const void *what);
+/* and _mod(), _nmod(), _mod_at(), _content_id(), _count(), _types(), _tops(),
+ * cbl_ysids_node_path() */
+
+/* the translation; a refusal's RFC 8040 error-tag in *tag */
+int	cbl_yxlate_json(const struct cbl_ysids *, const void *cbor, size_t,
+	    struct cbl_ybuf *, char *why, size_t whylen);	/* {SID: v} to {"m:n": v} */
+int	cbl_yxlate_json_member(const struct cbl_ysids *, const struct cbl_ysid_item *,
+	    const void *cbor, size_t, bool *first, struct cbl_ybuf *, char *, size_t);
+int	cbl_yxlate_cbor(const struct cbl_ysids *, const char *json, size_t,
+	    struct cbl_ybuf *, const char **tag, char *why, size_t whylen);
+int	cbl_yxlate_cbor_member(const struct cbl_ysids *, const struct cbl_ysid_item *,
+	    const char *json, size_t, struct cbl_ybuf *, const char **tag, char *, size_t);
+int	cbl_yxlate_iid(const struct cbl_ysids *, const char *xpath, struct cbl_ybuf *,
+	    char *why, size_t whylen);
+
+/* CBOR of definite lengths, read; a head written */
+struct cbl_ycrd { const uint8_t *p, *end; };
+int	cbl_ycrd_head(struct cbl_ycrd *, int *major, uint64_t *arg);	/* and _peek(), _text(), _skip() */
+int	cbl_ybuf_head(struct cbl_ybuf *, int major, uint64_t arg);
+```
+
 ## 8. Families (server side, and client side for symmetric use)
 
 A program's own operations, when the YANG family's do not fit (a stream
