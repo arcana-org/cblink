@@ -117,6 +117,36 @@ int		 cbl_d_vstring(const struct cbl_yschema *s,
 /* Defaults under n whose whens are false removed (cbl_dcond.c). */
 ssize_t		 cbl_d_prune_defaults(cbl_dnode *n);
 
+/*
+ * A NACM path against a schema node with no instance in a tree, or an
+ * action's target (cbl_dnacm.c): yes, no, or not known, a predicate
+ * falling on a node of which no instance is known.
+ */
+#define	CBL_D_NACM_NO		0
+#define	CBL_D_NACM_YES		1
+#define	CBL_D_NACM_UNKNOWN	2
+int	cbl_d_nacm_path_match_at(const cbl_dnacm_path *p,
+	    const struct cbl_ynode *sn, const struct cbl_ynode *at,
+	    const void *const *vals, size_t nvals, const char *user);
+
+/*
+ * cbl_dtree_check_conds() and cbl_dtree_check_refs() with a say over
+ * failures: of n (NULL: the tree), alone with shallow; each failure,
+ * said in *err, offered to tol first, which lets it pass (true: the
+ * check goes on) or not (false: it is the answer).
+ */
+typedef bool	 cbl_d_tolerate_f(void *arg, const struct cbl_dederr *err);
+int	cbl_d_check_conds(const cbl_dtree *t, const cbl_dnode *n,
+	    bool shallow, struct cbl_dederr *err, cbl_d_tolerate_f *tol,
+	    void *arg);
+int	cbl_d_check_refs(const cbl_dtree *t, const cbl_dnode *n,
+	    bool shallow, struct cbl_dederr *err, cbl_d_tolerate_f *tol,
+	    void *arg);
+
+/* The node of tree t that is k's instance (k of another tree of the
+ * same schema: the same nodes down, the same keys), or NULL. */
+const cbl_dnode *cbl_d_counterpart(const cbl_dtree *t, const cbl_dnode *k);
+
 /* The node an instance-identifier's YANG-CBOR names in t, or NULL. */
 const cbl_dnode *cbl_d_iid_node(const cbl_dtree *t,
 	    const struct cbl_bytes *v, cbl_yarena *a);

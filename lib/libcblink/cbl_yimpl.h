@@ -63,6 +63,11 @@ int	cbl_yds_running(cbl_req *req, struct cbl_dtree **tp);
 int	cbl_yds_get(cbl_req *req, cbl_msg *reply, const uint64_t *v, size_t n,
 	    const char *xpath, enum cbl_yds_name ds, int wd);
 int	cbl_yds_edit(cbl_req *req, const cbl_msg *msg);
+/* running as an EDIT of it would make it, each of n top-level nodes
+ * (v[i], its YANG-CBOR p[i] of len[i] bytes; NULL: deleted) in its
+ * place, held to its whens, musts and references as a whole. */
+int	cbl_yds_check_running(cbl_req *req, const struct cbl_ynode *const *v,
+	    const uint8_t *const *p, const size_t *len, size_t n);
 bool	cbl_yds_running_locked(cbl_req *req);
 int	cbl_yds_rpc(cbl_req *req, const cbl_msg *msg, const struct cbl_ynode *n,
 	    bool *handled);
@@ -103,12 +108,17 @@ void	cbl_ysub_event(cbl_ctx *ctx, const struct cbl_ynode *n,
  * of n may be sent to who.  conn: one of the context's, for a read of
  * the rules (NULL: none).
  */
+struct cbl_dnode;
 struct cbl_ywho {
 	const char	*user;
 	bool		 recovery;
 };
 
-int	cbl_ynacm_exec(cbl_req *req, const struct cbl_ynode *n);
+int	cbl_ynacm_exec(cbl_req *req, const struct cbl_ynode *n,
+	    const struct cbl_ynode *at, const void *const *vals, size_t nvals);
+int	cbl_ynacm_check_rules(cbl_req *req, const struct cbl_ynode *n,
+	    const void *after);
+bool	cbl_ynacm_may_read(cbl_req *req, const struct cbl_dnode *n);
 int	cbl_ynacm_read(cbl_ctx *ctx, cbl_conn *conn, const struct cbl_ywho *who,
 	    struct cbl_dtree *t);
 bool	cbl_ynacm_reads_all(cbl_ctx *ctx, cbl_conn *conn,

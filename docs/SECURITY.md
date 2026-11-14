@@ -83,7 +83,8 @@ data they receive.
   `EADDRINUSE`.
 - **Credentials.** Peers are identified by `getpeereid(3)`. They count as
   authenticated only on a listener created with `CBL_LF_UNIX_TRUSTED`,
-  which declares that the filesystem permissions are the access control.
+  which declares that the filesystem permissions are the access control,
+  and only when `getpeereid(3)` gave their credentials.
 
 ## 4. Hostile input
 

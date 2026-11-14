@@ -928,7 +928,10 @@ listener_accept(cbl_listener *l, cbl_conn **connp)
 		if (getpeereid(fd, &conn->peer.uid, &conn->peer.gid) == 0)
 			conn->peer.has_cred = true;
 		conn->peer.flags |= CBL_PEER_LOCAL;
-		if ((l->flags & CBL_LF_UNIX_TRUSTED) != 0)
+		/* Trusted as the uid it is: never one whose uid is not
+		 * known. */
+		if ((l->flags & CBL_LF_UNIX_TRUSTED) != 0 &&
+		    conn->peer.has_cred)
 			conn->peer.flags |= CBL_PEER_AUTHENTICATED;
 	}
 	peer_set_addr(conn, (struct sockaddr *)&ss, sslen);

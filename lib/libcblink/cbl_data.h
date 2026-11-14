@@ -326,7 +326,10 @@ bool		 cbl_dnacm_path_match_schema(const cbl_dnacm_path *p,
  * node set (its nodes each once, the array the value's), a boolean, a
  * number or a string (the value's); cbl_xval_free() frees it.  0, or an
  * errno and why (of whylen bytes): EFBIG for an expression that would
- * visit more than CBL_XP_WORK_MAX nodes, as one from a client may.
+ * do more than CBL_XP_WORK_MAX units of work, as one from a client may:
+ * a node visited, a call, a pair of nodes compared, a character a string
+ * function reads (re-match()'s more, the larger its pattern), and a
+ * pattern's compiled size.
  */
 #define	CBL_XP_WORK_MAX		(1u << 24)
 enum cbl_xv_kind {

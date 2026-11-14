@@ -561,7 +561,13 @@ cbl_sctp_connect(cbl_conn *conn, cbl_tls *tls, uint64_t deadline)
 		return (cbl_conn_seterr(conn, error, "sctp connect: %s",
 		    strerror(error)));
 	}
-	if (tls != NULL)
-		return (cbl_dtls_sctp_attach(conn, tls, false));
-	return (cbl_sctp_attach(conn));
+	/* Its transport not put on it: the socket closed, as above, so a
+	 * retry does not leak it. */
+	error = tls != NULL ? cbl_dtls_sctp_attach(conn, tls, false) :
+	    cbl_sctp_attach(conn);
+	if (error != 0) {
+		close(fd);
+		conn->fd = -1;
+	}
+	return (error);
 }

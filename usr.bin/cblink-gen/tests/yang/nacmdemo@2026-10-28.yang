@@ -44,6 +44,39 @@ module nacmdemo {
         description
           "What it says.";
       }
+      action reset {
+        description
+          "Run on one item: rules name the item by its key.";
+        output {
+          leaf ok {
+            type boolean;
+            description
+              "Whether it ran.";
+          }
+        }
+      }
+      notification changed {
+        description
+          "Of one item, sent without its key.";
+        leaf what {
+          type string;
+          description
+            "What changed.";
+        }
+      }
+    }
+    container sys {
+      description
+        "Deleted whole, with what is in it.";
+      container users {
+        description
+          "Held back by a rule of its own.";
+        leaf n {
+          type int32;
+          description
+            "A value.";
+        }
+      }
     }
   }
 
@@ -55,6 +88,15 @@ module nacmdemo {
       type int32;
       description
         "A value.";
+    }
+    leaf hidden-ref {
+      nacm:default-deny-all;
+      type leafref {
+        path "/nd:data/nd:public";
+      }
+      description
+        "Read by a rule that permits it alone: a failure of it is told
+         without its name to those who may not.";
     }
   }
 

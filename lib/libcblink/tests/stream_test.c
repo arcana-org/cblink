@@ -11,6 +11,13 @@
 
 #include "cbl_net_test.h"
 
+/*
+ * Freed memory filled with junk (jemalloc(3)'s "junk"): a stream used
+ * after it is freed reads garbage and fails, rather than reading what
+ * it held before and passing by chance.
+ */
+const char *malloc_conf = "junk:true";
+
 enum { S_CHAT = 1, S_FEED, S_REJECT, S_NOACCEPT, S_SINK, S_RESETDATA,
     S_LASTDATA, S_LATER, S_BADACCEPT };
 enum { SA_SEQ = 1, SA_PAD, SA_N };
@@ -1131,6 +1138,65 @@ ATF_TC_BODY(reset_in_on_writable, tc)
 	fx_teardown(&f);
 }
 
+/*
+ * A callback that frees its connection: on a loop-less connection the
+ * free is at once, and finishes the stream (on_close); what follows the
+ * callback in the library still has the stream it holds.
+ */
+struct freeing {
+	struct fx	*f;
+	atomic_int	 data;
+	atomic_int	 closed;
+};
+
+static void
+freeing_data(cbl_stream *s __unused, cbl_msg *data __unused, void *arg)
+{
+	struct freeing *fr = arg;
+
+	if (fr->data++ == 0) {
+		cbl_conn_free(fr->f->c);
+		fr->f->c = NULL;
+	}
+}
+
+static void
+freeing_close(cbl_stream *s __unused, int code __unused,
+    const char *text __unused, void *arg)
+{
+	struct freeing *fr = arg;
+
+	fr->closed++;
+}
+
+static const struct cbl_stream_cbs freeing_cbs = {
+	.on_data = freeing_data,
+	.on_close = freeing_close,
+};
+
+ATF_TC_WITHOUT_HEAD(free_in_callback);
+ATF_TC_BODY(free_in_callback, tc)
+{
+	struct freeing fr = { 0 };
+	struct fx f;
+	cbl_stream *s;
+	cbl_msg *m;
+	cbl_conn *c;
+
+	fx_setup(&f, 0, 0, 0);
+	fr.f = &f;
+	ATF_REQUIRE_EQ(0, cbl_msg_new(f.cctx, f.id, S_FEED, 0, &m));
+	t_put_uint(m, SA_N, 50);
+	ATF_REQUIRE_EQ(0, cbl_stream_open(f.c, m, CBL_SF_PUSH, &freeing_cbs,
+	    &fr, &s));
+	c = f.c;
+	drive(c, &fr.data, 1, 5000);
+	ATF_CHECK_EQ(1, fr.data);
+	ATF_CHECK_EQ(1, fr.closed);
+	ATF_CHECK(f.c == NULL);
+	fx_teardown(&f);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -1150,5 +1216,6 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, accept_wrong_seq);
 	ATF_TP_ADD_TC(tp, deferred_open);
 	ATF_TP_ADD_TC(tp, stream_ref);
+	ATF_TP_ADD_TC(tp, free_in_callback);
 	return (atf_no_error());
 }

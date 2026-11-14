@@ -610,7 +610,12 @@ tls_handshake(cbl_conn *conn)
 		return (cbl_conn_seterr(conn, EAUTH,
 		    "peer presented no verifiable certificate"));
 	cbl_peer_clear_identity(&conn->peer);
-	(void)cbl_peer_from_x509(&conn->peer, x);
+	/* Authenticated with its identity, never without. */
+	if (cbl_peer_from_x509(&conn->peer, x) != 0) {
+		cbl_peer_clear_identity(&conn->peer);
+		return (cbl_conn_seterr(conn, ENOMEM,
+		    "the peer's identity could not be read"));
+	}
 	conn->peer.flags |= CBL_PEER_AUTHENTICATED;
 	return (0);
 }
@@ -631,6 +636,15 @@ tls_read(cbl_conn *conn, void *buf, size_t len, size_t *got)
 		return (0);
 	}
 	return (error);
+}
+
+/* Plaintext OpenSSL holds, of a record read in part: no event tells it. */
+static bool
+tls_pending(cbl_conn *conn)
+{
+	struct tls_tr *t = conn->trpriv;
+
+	return (t != NULL && SSL_pending(t->ssl) > 0);
 }
 
 static int
@@ -676,6 +690,7 @@ const struct cbl_tr_ops cbl_tr_tls_ops = {
 	.name = "tls",
 	.handshake = tls_handshake,
 	.read = tls_read,
+	.pending = tls_pending,
 	.write = tls_write,
 	.shutdown = tls_shutdown,
 	.free = tls_free,
@@ -693,9 +708,10 @@ is_ip(const char *s)
 
 /*
  * Client name check: cbl_tls_set_peer_name(), or by default the first
- * host of the URI (an IP address is matched against IP SANs).
+ * host of the URI (an IP address is matched against IP SANs).  0, or an
+ * errno where the name could not be set: no connection goes unchecked.
  */
-static void
+static int
 set_peer_name(cbl_conn *conn, cbl_tls *tls, SSL *ssl)
 {
 	const char *name = NULL;
@@ -717,17 +733,23 @@ set_peer_name(cbl_conn *conn, cbl_tls *tls, SSL *ssl)
 		name = host;
 	}
 	if (*name == '\0')
-		return;
-	if (is_ip(name))
-		(void)X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), name);
-	else {
+		return (0);
+	if (is_ip(name)) {
+		if (X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl),
+		    name) != 1)
+			return (cbl_conn_seterr(conn, ENOMEM, "TLS: the name "
+			    "to check, %s, could not be set", name));
+	} else {
 		char sni[256];
 
 		/* The macro wants a mutable string. */
 		strlcpy(sni, name, sizeof(sni));
 		(void)SSL_set_tlsext_host_name(ssl, sni);
-		(void)SSL_set1_host(ssl, name);
+		if (SSL_set1_host(ssl, name) != 1)
+			return (cbl_conn_seterr(conn, ENOMEM, "TLS: the name "
+			    "to check, %s, could not be set", name));
 	}
+	return (0);
 }
 
 /*
@@ -740,6 +762,7 @@ cbl_tls_attach(cbl_conn *conn, cbl_tls *tls, bool server)
 {
 	struct tls_tr *t;
 	SSL_CTX *c;
+	int error;
 
 	if ((c = cbl_tls_ctx(tls, server ? CBL_TLS_SERVER :
 	    CBL_TLS_CLIENT)) == NULL)
@@ -759,7 +782,11 @@ cbl_tls_attach(cbl_conn *conn, cbl_tls *tls, bool server)
 		SSL_set_accept_state(t->ssl);
 	else {
 		SSL_set_connect_state(t->ssl);
-		set_peer_name(conn, tls, t->ssl);
+		if ((error = set_peer_name(conn, tls, t->ssl)) != 0) {
+			SSL_free(t->ssl);
+			free(t);
+			return (error);
+		}
 	}
 	conn->trpriv = t;
 	conn->ops = &cbl_tr_tls_ops;
@@ -904,6 +931,7 @@ cbl_dtls_sctp_attach(cbl_conn *conn, cbl_tls *tls, bool server)
 	struct tls_tr *t;
 	SSL_CTX *c;
 	BIO *bio;
+	int error;
 
 	if ((c = cbl_tls_ctx(tls, server ? CBL_DTLS_SERVER :
 	    CBL_DTLS_CLIENT)) == NULL)
@@ -934,7 +962,12 @@ cbl_dtls_sctp_attach(cbl_conn *conn, cbl_tls *tls, bool server)
 		SSL_set_accept_state(t->ssl);
 	else {
 		SSL_set_connect_state(t->ssl);
-		set_peer_name(conn, tls, t->ssl);
+		if ((error = set_peer_name(conn, tls, t->ssl)) != 0) {
+			cbl_sctp_mux_free(t->mux);
+			SSL_free(t->ssl);
+			free(t);
+			return (error);
+		}
 	}
 	conn->trpriv = t;
 	conn->ops = &cbl_tr_dtls_sctp_ops;

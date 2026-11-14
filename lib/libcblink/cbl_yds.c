@@ -32,6 +32,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -279,7 +280,8 @@ cbl_ydatastores(cbl_ctx *ctx, unsigned flags, cbl_yundo_f *undo_failed,
 {
 	struct cbl_yds *d;
 
-	if (ctx == NULL || (flags & ~CBL_YDS_CONFIRMED) != 0)
+	if (ctx == NULL ||
+	    (flags & ~(CBL_YDS_CONFIRMED | CBL_YDS_REFS_WARN)) != 0)
 		return (EINVAL);
 	if (ctx->yds != NULL)
 		return (EEXIST);
@@ -373,7 +375,9 @@ rollback(struct cbl_yds *d, cbl_conn *conn)
 			/* On-change subscriptions told. */
 			cbl_ysub_changed(d->ctx, f.n);
 		}
-		if (error != 0 && d->undo_failed != NULL)
+		/* Told with its node; one no server has (none is ever
+		 * taken away, so none) cannot be told of. */
+		if (error != 0 && d->undo_failed != NULL && f.n != NULL)
 			d->undo_failed(d->ctx, f.n, error, r.err_msg != NULL ?
 			    r.err_msg : why[0] != '\0' ? why : strerror(error),
 			    d->arg);
@@ -624,6 +628,169 @@ cbl_yds_running_locked(cbl_req *req)
 	return (d != NULL && (d->flags & CBL_YDS_CONFIRMED) != 0);
 }
 
+/* What whole_conds() needs to judge a failure: who asks, both trees. */
+struct whole {
+	cbl_req			*req;
+	const cbl_dtree		*after, *before;
+	bool			 refs_warn;	/* CBL_YDS_REFS_WARN */
+	int			 error;		/* of a warning not made */
+};
+
+/* Whether a and b, nodes of trees of one schema, encode the same. */
+static bool
+same_bytes(const cbl_dnode *a, const cbl_dnode *b)
+{
+	struct cbl_ybuf x = { NULL, 0, 0 }, y = { NULL, 0, 0 };
+	bool same;
+
+	same = cbl_dnode_encode(a, &x) == 0 && cbl_dnode_encode(b, &y) == 0 &&
+	    x.len == y.len && memcmp(x.p, y.p, x.len) == 0;
+	cbl_ybuf_free(&x);
+	cbl_ybuf_free(&y);
+	return (same);
+}
+
+/*
+ * A failure of the tree to be running (err, at err->node of it): let
+ * pass, a warning, where it is no change's: running has the same failure
+ * at the same node (its own when, must, mandatory node or reference,
+ * held alone), and the node, with all below it, is as it was.  What the
+ * edit makes fail, or leaves failing in a node it changes, is refused.
+ * Only what fails after is looked at before, a node at a time.
+ */
+static bool
+pre_existing(void *arg, const struct cbl_dederr *err)
+{
+	struct whole *w = arg;
+	struct cbl_dederr was;
+	const cbl_dnode *n = err->node, *bn;
+	char text[300];
+	int error;
+
+	if (n == NULL || cbl_dnode_schema(n) == NULL)
+		return (false);
+	/* A reference to what is not there, where the datastore says so:
+	 * a warning, old or new (what it names may come later). */
+	if (w->refs_warn && strcmp(err->tag, "data-missing") == 0) {
+		if (cbl_ynacm_may_read(w->req, n))
+			(void)snprintf(text, sizeof(text), "%s", err->msg);
+		else
+			(void)snprintf(text, sizeof(text), "a reference of the "
+			    "configuration names what is not there");
+		if ((error = cbl_req_ywarn(w->req, cbl_ynacm_may_read(w->req,
+		    n) ? cbl_dnode_schema(n)->sid : 0, err->apptag != NULL ?
+		    err->apptag : err->tag, text)) != 0) {
+			w->error = error;
+			return (false);
+		}
+		return (true);
+	}
+	if ((bn = cbl_d_counterpart(w->before, n)) == NULL ||
+	    !same_bytes(n, bn))
+		return (false);
+	if (strcmp(err->tag, "data-missing") == 0)
+		error = cbl_d_check_refs(w->before, bn, true, &was, NULL, NULL);
+	else
+		error = cbl_d_check_conds(w->before, bn, true, &was, NULL,
+		    NULL);
+	if (error == 0 || was.tag == NULL || strcmp(was.tag, err->tag) != 0 ||
+	    strcmp(was.msg, err->msg) != 0)
+		return (false);
+	/* Told, naming the node only to who may read it. */
+	if (cbl_ynacm_may_read(w->req, n))
+		(void)snprintf(text, sizeof(text), "running had this before "
+		    "the change, which leaves it: %s", err->msg);
+	else
+		(void)snprintf(text, sizeof(text), "running had a condition "
+		    "that does not hold before the change, which leaves it");
+	if ((error = cbl_req_ywarn(w->req, cbl_ynacm_may_read(w->req, n) ?
+	    cbl_dnode_schema(n)->sid : 0, err->apptag != NULL ? err->apptag :
+	    err->tag, text)) != 0) {
+		w->error = error;
+		return (false);
+	}
+	return (true);
+}
+
+/*
+ * after, a configuration about to be running (its own, changed: its
+ * defaults made), held to its whens, musts and references as a whole
+ * (RFC 7950 section 8.3): what a change breaks of the nodes it did not
+ * change too, a leafref to what it took away, a must that looks at it.
+ * A failure running before (its own, changed likewise) already had, of
+ * a node the change leaves as it was, is a warning, not a refusal
+ * (pre_existing()); with CBL_YDS_REFS_WARN, so is every reference to
+ * what is not there, old or new.  Each expression's work is bounded
+ * (CBL_XP_WORK_MAX).
+ * 0, or the first failure said for req, naming its node only where the
+ * requester may read it.
+ */
+static int
+whole_conds(cbl_req *req, cbl_dtree *after, cbl_dtree *before)
+{
+	struct cbl_yds *d = req->conn != NULL ? req->conn->ctx->yds : NULL;
+	struct whole w = { .req = req, .after = after, .before = before,
+	    .refs_warn = d != NULL && (d->flags & CBL_YDS_REFS_WARN) != 0 };
+	struct cbl_dederr err;
+	bool shown;
+	int error;
+
+	if (cbl_dtree_defaults(cbl_dtree_root(after)) < 0 ||
+	    cbl_dtree_defaults(cbl_dtree_root(before)) < 0)
+		return (errno != 0 ? errno : ENOMEM);
+	if ((error = cbl_d_check_conds(after, NULL, false, &err, pre_existing,
+	    &w)) == 0 && (error = cbl_d_check_refs(after, NULL, false, &err,
+	    pre_existing, &w)) == 0)
+		return (0);
+	if (w.error != 0)
+		return (w.error);
+	shown = cbl_ynacm_may_read(req, err.node);
+	if (err.apptag != NULL)
+		(void)cbl_req_set_yapptag(req, err.apptag);
+	return (cbl_ysay(req, error, shown && err.node != NULL &&
+	    cbl_dnode_schema(err.node) != NULL ?
+	    cbl_dnode_schema(err.node)->sid : 0, err.tag != NULL ? err.tag :
+	    "operation-failed", shown ? err.msg : "a condition of the "
+	    "configuration would not hold"));
+}
+
+int
+cbl_yds_check_running(cbl_req *req, const struct cbl_ynode *const *v,
+    const uint8_t *const *p, const size_t *len, size_t n)
+{
+	cbl_dtree *t, *was;
+	cbl_dnode *c, *next;
+	char why[160];
+	int error;
+
+	if ((error = cbl_yds_running(req, &was)) != 0)
+		return (error);
+	if ((t = tree_copy(was)) == NULL) {
+		cbl_dtree_free(was);
+		return (ENOMEM);
+	}
+	for (size_t i = 0; error == 0 && i < n; i++) {
+		for (c = cbl_dnode_first(cbl_dtree_root(t)); c != NULL;
+		    c = next) {
+			next = cbl_dnode_next(c);
+			if (cbl_dnode_schema(c) == v[i])
+				(void)cbl_dnode_remove(c);
+		}
+		if (p[i] != NULL && (error = cbl_dnode_decode(cbl_dtree_root(t),
+		    v[i], p[i], len[i], CBL_YD_STRICT, why, sizeof(why),
+		    NULL)) != 0)
+			error = cbl_ysay(req, error, v[i]->sid, "bad-element",
+			    why);
+	}
+	if (error == 0) {
+		prune_state(cbl_dtree_root(t));
+		error = whole_conds(req, t, was);
+	}
+	cbl_dtree_free(t);
+	cbl_dtree_free(was);
+	return (error);
+}
+
 /*
  * An EDIT of the candidate: each node it names checked as an EDIT of
  * running is (decoded, valid, NACM's write) against the candidate, then
@@ -731,8 +898,9 @@ cbl_yds_edit(cbl_req *req, const cbl_msg *msg)
 			if (after == NULL)
 				error = cbl_ysay(req, error, sid, "bad-element",
 				    why);
-			else if ((del || (error = cbl_yvalid_member(req, f.n,
-			    after)) == 0) && (error = cbl_ynacm_write(req,
+			else if ((del || ((error = cbl_yvalid_member(req, f.n,
+			    after)) == 0 && (error = cbl_ynacm_check_rules(req,
+			    f.n, after)) == 0)) && (error = cbl_ynacm_write(req,
 			    f.n, before, after)) == 0) {
 				for (c = cbl_dnode_first(cbl_dtree_root(cand));
 				    c != NULL; c = next) {
@@ -796,7 +964,19 @@ apply(cbl_req *req, struct cbl_yds *d, struct change **chp, size_t *nchp,
 	*nchp = 0;
 	if (d->cand == NULL)
 		return (0);
-	if ((error = cbl_yds_running(req, &run)) != 0 ||
+	if ((error = cbl_yds_running(req, &run)) != 0)
+		goto out;
+	/* The candidate as a whole, what running is to be, against
+	 * running as it is (copies: their defaults are made). */
+	{
+		cbl_dtree *after = tree_copy(d->cand), *before = tree_copy(run);
+
+		error = after == NULL || before == NULL ? ENOMEM :
+		    whole_conds(req, after, before);
+		cbl_dtree_free(after);
+		cbl_dtree_free(before);
+	}
+	if (error != 0 ||
 	    (error = config_sids(req->conn->ctx, true, &v, &n)) != 0)
 		goto out;
 	if (n > 0 && (ch = calloc(n, sizeof(*ch))) == NULL) {
@@ -961,7 +1141,7 @@ cbl_yds_rpc(cbl_req *req, const cbl_msg *msg, const struct cbl_ynode *n,
 	    "cancel-commit") != 0 && strcmp(n->name, "discard-changes") != 0))
 		return (0);
 	*handled = true;
-	if ((error = cbl_ynacm_exec(req, n)) != 0)
+	if ((error = cbl_ynacm_exec(req, n, NULL, NULL, 0)) != 0)
 		return (error);
 	for (uint32_t i = 0; i < n->nchild; i++)
 		if (n->child[i]->kind == CBL_YN_INPUT)

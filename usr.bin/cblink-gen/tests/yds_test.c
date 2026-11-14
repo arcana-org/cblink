@@ -26,6 +26,10 @@
 #include "ydsh.h"
 
 static const struct cbl_ynode *n_cfg, *n_commit, *n_cancel, *n_discard;
+static const struct cbl_ynode *n_refs;
+
+/* refs's to-b as its handlers keep it: "", none. */
+static char kept_to_b[32];
 
 /* cfg as the handlers keep it. */
 static struct {
@@ -138,7 +142,35 @@ undo_failed(cbl_ctx *ctx, const struct cbl_ynode *n, int error,
 	kept.undo_fails++;
 }
 
-static struct cbl_yhandler handlers[1];
+static int
+refs_get(cbl_req *req, void *data, cbl_yarena *a)
+{
+	struct dsdemo *d = data;
+	struct dsdemo_refs *r;
+
+	(void)req;
+	if (kept_to_b[0] == '\0')
+		return (0);
+	if ((r = cbl_yarena_alloc(a, sizeof(*r))) == NULL)
+		return (ENOMEM);
+	r->to_b = kept_to_b;
+	d->refs = r;
+	return (0);
+}
+
+static int
+refs_edit(cbl_req *req, const void *before, const void *after)
+{
+	const struct dsdemo *x = after;
+
+	(void)req;
+	(void)before;
+	(void)strlcpy(kept_to_b, x->refs != NULL && x->refs->to_b != NULL ?
+	    x->refs->to_b : "", sizeof(kept_to_b));
+	return (0);
+}
+
+static struct cbl_yhandler handlers[2];
 static struct cbl_yserver server = { .schema = &ydsh_schema };
 
 struct fixture {
@@ -166,8 +198,12 @@ setup(struct fixture *f)
 	n_commit = top("ietf-netconf", "commit");
 	n_cancel = top("ietf-netconf", "cancel-commit");
 	n_discard = top("ietf-netconf", "discard-changes");
+	n_refs = top("dsdemo", "refs");
 	handlers[0] = (struct cbl_yhandler){ n_cfg->sid, cfg_get, cfg_edit,
 	    NULL, NULL };
+	handlers[1] = (struct cbl_yhandler){ n_refs->sid, refs_get, refs_edit,
+	    NULL, NULL };
+	kept_to_b[0] = '\0';
 	server.nhandler = nitems(handlers);
 	server.handler = handlers;
 	memset(&kept, 0, sizeof(kept));
@@ -665,6 +701,284 @@ ATF_TC_BODY(undo_accepts, tc)
 	teardown(&f);
 }
 
+/* EDIT cfg as given in running itself; the reply's text into msg. */
+static int
+edit_running(struct fixture *f, struct dsdemo_cfg *cfg, char *msg,
+    size_t len)
+{
+	struct dsdemo d = { .cfg = cfg };
+	cbl_msg *m, *r = NULL;
+	int error;
+
+	ATF_REQUIRE_EQ(0, cbl_msg_new(f->cctx, CBL_YANG_FAMILY, CBL_YCMD_EDIT,
+	    0, &m));
+	ATF_REQUIRE_EQ(0, cbl_msg_put_ymember(m, n_cfg, &d));
+	error = cbl_request(f->c, m, &r, 5000);
+	(void)snprintf(msg, len, "%s", r != NULL && cbl_msg_err_str(r) !=
+	    NULL ? cbl_msg_err_str(r) : "");
+	cbl_msg_free(r);
+	return (error);
+}
+
+/*
+ * An EDIT of running itself is held to what a commit is: a mandatory
+ * leaf a when brings, a must; and running as a whole, a leafref of a
+ * node the EDIT does not name to what it takes away (refs's to-b to
+ * cfg's b).  A commit likewise: the candidate as a whole.
+ */
+ATF_TC_WITHOUT_HEAD(running_conditions);
+ATF_TC_BODY(running_conditions, tc)
+{
+	struct dsdemo_cfg cfg;
+	struct fixture f;
+	char msg[256];
+
+	setup(&f);
+	/* Not confirmed-only: running is edited itself. */
+	cbl_conn_free(f.c);
+	test_server_stop(&f.ts);
+	cbl_ctx_free(f.sctx);
+	f.sctx = test_ctx();
+	ATF_REQUIRE_EQ(0, cbl_yserver_add(f.sctx, &server, NULL));
+	ATF_REQUIRE_EQ(0, cbl_ydatastores(f.sctx, 0, undo_failed, NULL));
+	test_server_start(&f.ts, f.sctx, "tcp://127.0.0.1:0",
+	    CBL_PLAINTEXT);
+	f.c = dial(&f);
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.has_a = true;
+	cfg.a = 2;
+	cfg.b = "x";
+	cfg.has_kind = true;
+	cfg.kind = DSDEMO_CFG_KIND_TAGGED;
+	ATF_CHECK_EQ(EINVAL, edit_running(&f, &cfg, msg, sizeof(msg)));
+	ATF_CHECK_MSG(strstr(msg, "tag-id: mandatory, missing") != NULL, "%s",
+	    msg);
+	cfg.has_tag_id = true;
+	cfg.tag_id = 100;
+	cfg.c = "nine char";
+	ATF_CHECK_EQ(EINVAL, edit_running(&f, &cfg, msg, sizeof(msg)));
+	ATF_CHECK_STREQ("c is 8 characters at most", msg);
+	cfg.c = "eight ch";
+	ATF_CHECK_EQ_MSG(0, edit_running(&f, &cfg, msg, sizeof(msg)), "%s",
+	    msg);
+	ATF_CHECK_STREQ("x", kept.b);
+	/* refs points at b "x": b changed alone leaves it dangling. */
+	(void)strlcpy(kept_to_b, "x", sizeof(kept_to_b));
+	cfg.b = "y";
+	ATF_CHECK_EQ(ENOENT, edit_running(&f, &cfg, msg, sizeof(msg)));
+	ATF_CHECK_STREQ("x", kept.b);
+	/* The candidate edited so (cfg alone looked at), not committed. */
+	ATF_CHECK_EQ_MSG(0, edit_cfg(&f, &cfg, msg, sizeof(msg)), "%s", msg);
+	ATF_CHECK_EQ(ENOENT, commit(&f, f.c, 0, NULL, NULL, NULL, NULL));
+	ATF_CHECK_STREQ("x", kept.b);
+	cfg.b = "x";
+	ATF_CHECK_EQ_MSG(0, edit_cfg(&f, &cfg, msg, sizeof(msg)), "%s", msg);
+	ATF_CHECK_EQ(0, commit(&f, f.c, 0, NULL, NULL, NULL, NULL));
+	teardown(&f);
+}
+
+/* EDIT cfg in running itself: the errno; the first warning's text and
+ * node into text and *wsid ("" and 0: none), the error's into text. */
+static int
+edit_running_warn(struct fixture *f, struct dsdemo_cfg *cfg, char *text,
+    size_t len, uint64_t *wsid)
+{
+	const struct cbl_ywarning *w;
+	struct dsdemo d = { .cfg = cfg };
+	cbl_msg *m, *r = NULL;
+	cbl_yarena *a;
+	size_t nw = 0;
+	int error;
+
+	text[0] = '\0';
+	*wsid = 0;
+	ATF_REQUIRE_EQ(0, cbl_msg_new(f->cctx, CBL_YANG_FAMILY, CBL_YCMD_EDIT,
+	    0, &m));
+	ATF_REQUIRE_EQ(0, cbl_msg_put_ymember(m, n_cfg, &d));
+	error = cbl_request(f->c, m, &r, 5000);
+	ATF_REQUIRE((a = cbl_yarena_new()) != NULL);
+	if (error != 0)
+		(void)snprintf(text, len, "%s", r != NULL &&
+		    cbl_msg_err_str(r) != NULL ? cbl_msg_err_str(r) : "");
+	else if (r != NULL && cbl_msg_ywarnings(r, a, &w, &nw) == 0 &&
+	    nw > 0) {
+		(void)snprintf(text, len, "%s", w[0].text);
+		*wsid = w[0].sid;
+	}
+	cbl_yarena_free(a);
+	cbl_msg_free(r);
+	return (error);
+}
+
+/*
+ * What running had wrong before an edit does not refuse an edit that
+ * leaves it as it was: refs's to-b dangling (cfg's b is not it) is a
+ * warning naming to-b on an edit of cfg's a; an edit that makes another
+ * condition fail is refused; one that changes the node with the old
+ * failure and leaves it failing is refused; one that mends it, no
+ * warning.  A commit likewise.
+ */
+ATF_TC_WITHOUT_HEAD(running_preexisting);
+ATF_TC_BODY(running_preexisting, tc)
+{
+	const struct cbl_ynode *n_tob = NULL;
+	struct dsdemo_cfg cfg;
+	struct dsdemo_refs refs = { .to_b = "z" };
+	struct dsdemo dr = { .refs = &refs };
+	struct fixture f;
+	char text[256];
+	uint64_t wsid;
+	cbl_msg *m, *r;
+
+	setup(&f);
+	cbl_conn_free(f.c);
+	test_server_stop(&f.ts);
+	cbl_ctx_free(f.sctx);
+	f.sctx = test_ctx();
+	ATF_REQUIRE_EQ(0, cbl_yserver_add(f.sctx, &server, NULL));
+	ATF_REQUIRE_EQ(0, cbl_ydatastores(f.sctx, 0, undo_failed, NULL));
+	test_server_start(&f.ts, f.sctx, "tcp://127.0.0.1:0",
+	    CBL_PLAINTEXT);
+	f.c = dial(&f);
+	for (uint32_t i = 0; i < n_refs->nchild; i++)
+		if (strcmp(n_refs->child[i]->name, "to-b") == 0)
+			n_tob = n_refs->child[i];
+	ATF_REQUIRE(n_tob != NULL);
+	/* Before: b "y", to-b "x", dangling. */
+	(void)strlcpy(kept.b, "y", sizeof(kept.b));
+	(void)strlcpy(kept_to_b, "x", sizeof(kept_to_b));
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.has_a = true;
+	cfg.a = 5;
+	cfg.b = "y";
+	ATF_CHECK_EQ_MSG(0, edit_running_warn(&f, &cfg, text, sizeof(text),
+	    &wsid), "%s", text);
+	ATF_CHECK_EQ(5, kept.a);
+	ATF_CHECK_MSG(strstr(text, "to-b") != NULL, "warning: %s", text);
+	ATF_CHECK_EQ(n_tob->sid, wsid);
+	/* A new failure: refused. */
+	cfg.c = "nine char";
+	ATF_CHECK_EQ(EINVAL, edit_running_warn(&f, &cfg, text, sizeof(text),
+	    &wsid));
+	ATF_CHECK_STREQ("c is 8 characters at most", text);
+	cfg.c = NULL;
+	/* refs changed, to-b still dangling: refused. */
+	ATF_REQUIRE_EQ(0, cbl_msg_new(f.cctx, CBL_YANG_FAMILY, CBL_YCMD_EDIT,
+	    0, &m));
+	ATF_REQUIRE_EQ(0, cbl_msg_put_ymember(m, n_refs, &dr));
+	r = NULL;
+	ATF_CHECK_EQ(ENOENT, cbl_request(f.c, m, &r, 5000));
+	cbl_msg_free(r);
+	ATF_CHECK_STREQ("x", kept_to_b);
+	/* A commit that leaves it: a warning, done. */
+	cfg.a = 6;
+	ATF_CHECK_EQ_MSG(0, edit_cfg(&f, &cfg, text, sizeof(text)), "%s", text);
+	r = NULL;
+	ATF_CHECK_EQ(0, commit(&f, f.c, 0, NULL, NULL, NULL, &r));
+	{
+		const struct cbl_ywarning *w;
+		cbl_yarena *a = cbl_yarena_new();
+		size_t nw = 0;
+
+		ATF_REQUIRE(a != NULL);
+		ATF_CHECK(r != NULL && cbl_msg_ywarnings(r, a, &w, &nw) == 0 &&
+		    nw == 1 && strstr(w[0].text, "to-b") != NULL);
+		cbl_yarena_free(a);
+	}
+	cbl_msg_free(r);
+	ATF_CHECK_EQ(6, kept.a);
+	/* Mended: b "x", no warning. */
+	cfg.b = "x";
+	ATF_CHECK_EQ_MSG(0, edit_running_warn(&f, &cfg, text, sizeof(text),
+	    &wsid), "%s", text);
+	ATF_CHECK_STREQ("", text);
+	ATF_CHECK_STREQ("x", kept.b);
+	teardown(&f);
+}
+
+/*
+ * With CBL_YDS_REFS_WARN, a reference to what is not there refuses
+ * nothing, new or old: an EDIT of running that leaves refs's to-b
+ * dangling, one that makes it dangle anew, a commit that does, each
+ * done with a warning naming to-b; a must still refuses.
+ */
+ATF_TC_WITHOUT_HEAD(running_refs_warn);
+ATF_TC_BODY(running_refs_warn, tc)
+{
+	const struct cbl_ynode *n_tob = NULL;
+	struct dsdemo_cfg cfg;
+	struct dsdemo_refs refs = { .to_b = "z" };
+	struct dsdemo dr = { .refs = &refs };
+	const struct cbl_ywarning *w;
+	struct fixture f;
+	char text[256];
+	uint64_t wsid;
+	cbl_yarena *a;
+	cbl_msg *m, *r;
+	size_t nw;
+
+	setup(&f);
+	cbl_conn_free(f.c);
+	test_server_stop(&f.ts);
+	cbl_ctx_free(f.sctx);
+	f.sctx = test_ctx();
+	ATF_REQUIRE_EQ(0, cbl_yserver_add(f.sctx, &server, NULL));
+	ATF_REQUIRE_EQ(0, cbl_ydatastores(f.sctx, CBL_YDS_REFS_WARN,
+	    undo_failed, NULL));
+	test_server_start(&f.ts, f.sctx, "tcp://127.0.0.1:0",
+	    CBL_PLAINTEXT);
+	f.c = dial(&f);
+	for (uint32_t i = 0; i < n_refs->nchild; i++)
+		if (strcmp(n_refs->child[i]->name, "to-b") == 0)
+			n_tob = n_refs->child[i];
+	ATF_REQUIRE(n_tob != NULL);
+	(void)strlcpy(kept.b, "x", sizeof(kept.b));
+	(void)strlcpy(kept_to_b, "x", sizeof(kept_to_b));
+	/* b changed alone: to-b dangles, new, a warning. */
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.has_a = true;
+	cfg.a = 3;
+	cfg.b = "y";
+	ATF_CHECK_EQ_MSG(0, edit_running_warn(&f, &cfg, text, sizeof(text),
+	    &wsid), "%s", text);
+	ATF_CHECK_STREQ("y", kept.b);
+	ATF_CHECK_MSG(strstr(text, "to-b") != NULL, "warning: %s", text);
+	ATF_CHECK_EQ(n_tob->sid, wsid);
+	/* to-b changed, dangling still: done, warned. */
+	ATF_REQUIRE_EQ(0, cbl_msg_new(f.cctx, CBL_YANG_FAMILY, CBL_YCMD_EDIT,
+	    0, &m));
+	ATF_REQUIRE_EQ(0, cbl_msg_put_ymember(m, n_refs, &dr));
+	r = NULL;
+	ATF_CHECK_EQ(0, cbl_request(f.c, m, &r, 5000));
+	ATF_REQUIRE((a = cbl_yarena_new()) != NULL);
+	nw = 0;
+	ATF_CHECK(r != NULL && cbl_msg_ywarnings(r, a, &w, &nw) == 0 &&
+	    nw == 1 && w[0].sid == n_tob->sid);
+	cbl_yarena_free(a);
+	cbl_msg_free(r);
+	ATF_CHECK_STREQ("z", kept_to_b);
+	/* A must: refused as ever. */
+	cfg.c = "nine char";
+	ATF_CHECK_EQ(EINVAL, edit_running_warn(&f, &cfg, text, sizeof(text),
+	    &wsid));
+	cfg.c = NULL;
+	/* A commit that leaves it dangling: done, warned. */
+	cfg.a = 4;
+	ATF_CHECK_EQ_MSG(0, edit_cfg(&f, &cfg, text, sizeof(text)), "%s", text);
+	r = NULL;
+	ATF_CHECK_EQ(0, commit(&f, f.c, 0, NULL, NULL, NULL, &r));
+	ATF_REQUIRE((a = cbl_yarena_new()) != NULL);
+	nw = 0;
+	ATF_CHECK(r != NULL && cbl_msg_ywarnings(r, a, &w, &nw) == 0 &&
+	    nw == 1 && strstr(w[0].text, "to-b") != NULL);
+	cbl_yarena_free(a);
+	cbl_msg_free(r);
+	ATF_CHECK_EQ(4, kept.a);
+	teardown(&f);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -679,5 +993,8 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, failed_alone);
 	ATF_TP_ADD_TC(tp, with_defaults);
 	ATF_TP_ADD_TC(tp, with_origin);
+	ATF_TP_ADD_TC(tp, running_conditions);
+	ATF_TP_ADD_TC(tp, running_preexisting);
+	ATF_TP_ADD_TC(tp, running_refs_warn);
 	return (atf_no_error());
 }

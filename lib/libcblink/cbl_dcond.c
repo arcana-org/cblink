@@ -147,7 +147,24 @@ whens(const cbl_dtree *t, const cbl_dnode *c, bool *ok, int32_t *expr,
 struct cond {
 	const cbl_dtree		*t;
 	struct cbl_dederr	*err;
+	cbl_d_tolerate_f	*tol;	/* a failure let pass, or NULL */
+	void			*arg;
+	bool			 shallow; /* the node alone, not below it */
 };
+
+/* Failure error, said in r->err: let pass where r->tol says so, and the
+ * check goes on (0). */
+static int
+keep(struct cond *r, int error)
+{
+
+	if (error != 0 && r->tol != NULL && r->err != NULL &&
+	    r->tol(r->arg, r->err)) {
+		memset(r->err, 0, sizeof(*r->err));
+		return (0);
+	}
+	return (error);
+}
 
 static int
 fail(struct cond *r, int error, const cbl_dnode *at, const char *tag,
@@ -213,13 +230,18 @@ mandatory_whens(struct cond *r, const cbl_dnode *n, int depth)
 			    .hide = hide_when, .harg = w };
 			if ((error = eval_bool(r->t, w->expr, w->ctx ==
 			    CBL_YWC_ROOT ? &r->t->root : n, &view, &ok, why,
-			    sizeof(why))) != 0)
-				return (fail(r, error, n, "operation-failed",
-				    NULL, "%s: %s", c->name, why));
+			    sizeof(why))) != 0) {
+				if ((error = keep(r, fail(r, error, n,
+				    "operation-failed", NULL, "%s: %s", c->name,
+				    why))) != 0)
+					return (error);
+				ok = false;
+			}
 		}
-		if (ok && !own)
-			return (fail(r, EINVAL, n, "missing-element", NULL,
-			    "%s: mandatory, missing", c->name));
+		if (ok && !own && (error = keep(r, fail(r, EINVAL, n,
+		    "missing-element", NULL, "%s: mandatory, missing",
+		    c->name))) != 0)
+			return (error);
 	}
 	return (0);
 }
@@ -236,35 +258,42 @@ check_node(struct cond *r, const cbl_dnode *c, int depth)
 	bool ok;
 	int error;
 
+	/* A when that fails: the node is not to be, what is below it
+	 * not looked at. */
 	if ((error = whens(r->t, c, &ok, &expr, why, sizeof(why))) != 0)
-		return (fail(r, error, c, "operation-failed", NULL, "%s: %s",
-		    c->sn->name, why));
+		return (keep(r, fail(r, error, c, "operation-failed", NULL,
+		    "%s: %s", c->sn->name, why)));
 	/* A default under a false when: not in use, no error. */
 	if (!ok && (c->flags & CBL_DN_DEFAULT) != 0)
 		return (0);
 	if (!ok)
-		return (fail(r, EINVAL, c, "unknown-element", NULL,
-		    "%s: when %s: false", c->sn->name, s->xpath[expr]));
+		return (keep(r, fail(r, EINVAL, c, "unknown-element", NULL,
+		    "%s: when %s: false", c->sn->name, s->xpath[expr])));
 	for (uint16_t i = 0; i < c->sn->nmust; i++) {
 		const struct cbl_ymust *m = &c->sn->must[i];
 
 		if ((error = eval_bool(r->t, m->expr, c, NULL, &ok, why,
 		    sizeof(why))) != 0)
-			return (fail(r, error, c, "operation-failed", NULL,
-			    "%s: %s", c->sn->name, why));
-		if (ok)
+			error = fail(r, error, c, "operation-failed", NULL,
+			    "%s: %s", c->sn->name, why);
+		else if (ok)
 			continue;
-		if (m->emsg != NULL)
-			return (fail(r, EINVAL, c, "operation-failed",
+		else if (m->emsg != NULL)
+			error = fail(r, EINVAL, c, "operation-failed",
 			    m->eapptag != NULL ? m->eapptag : "must-violation",
-			    "%s", m->emsg));
-		return (fail(r, EINVAL, c, "operation-failed", m->eapptag !=
-		    NULL ? m->eapptag : "must-violation", "%s: must %s: false",
-		    c->sn->name, s->xpath[m->expr]));
+			    "%s", m->emsg);
+		else
+			error = fail(r, EINVAL, c, "operation-failed",
+			    m->eapptag != NULL ? m->eapptag : "must-violation",
+			    "%s: must %s: false", c->sn->name,
+			    s->xpath[m->expr]);
+		if ((error = keep(r, error)) != 0)
+			return (error);
 	}
 	if ((error = mandatory_whens(r, c, depth)) != 0)
 		return (error);
-	return (c->first != NULL ? check(r, c, depth + 1) : 0);
+	return (c->first != NULL && !r->shallow ? check(r, c, depth + 1) :
+	    0);
 }
 
 static int
@@ -303,6 +332,20 @@ cbl_dnode_check_conds(const cbl_dtree *t, const cbl_dnode *n,
 	if (t == NULL || n == NULL)
 		return (EINVAL);
 	return (check_node(&r, n, 0));
+}
+
+int
+cbl_d_check_conds(const cbl_dtree *t, const cbl_dnode *n, bool shallow,
+    struct cbl_dederr *err, cbl_d_tolerate_f *tol, void *arg)
+{
+	struct cond r = { .t = t, .err = err, .tol = tol, .arg = arg,
+	    .shallow = shallow };
+
+	if (err != NULL)
+		memset(err, 0, sizeof(*err));
+	if (t == NULL)
+		return (EINVAL);
+	return (n != NULL ? check_node(&r, n, 0) : check(&r, &t->root, 0));
 }
 
 /* The leaves and leaf-list entries of n's subtree, n's own if one. */

@@ -171,7 +171,8 @@ rd_str(struct cbl_ysids *s, struct cbl_ycrd *r, const char **out)
 	const char	*p;
 	size_t		 len;
 
-	if (cbl_ycrd_text(r, &p, &len) != 0)
+	/* A NUL in it would make it another, shorter one. */
+	if (cbl_ycrd_text(r, &p, &len) != 0 || memchr(p, '\0', len) != NULL)
 		return (EINVAL);
 	if ((*out = sdup(s, p, len)) == NULL)
 		return (ENOMEM);
@@ -253,7 +254,7 @@ cbl_ysids_file_cbor(struct cbl_ysids *s, const void *cbor, size_t len,
 			return (fail(why, whylen, "%s: an item not a map",
 			    mod));
 		id = NULL;
-		ns = CBL_YSID_NS_DATA + 1;
+		ns = UINT64_MAX;	/* none given: refused below */
 		isid = 0;
 		obs = false;
 		for (uint64_t j = 0; j < n; j++) {
@@ -690,6 +691,12 @@ cbl_ysids_done(struct cbl_ysids *s, char *why, size_t whylen)
 	}
 	qsort(s->byid, s->nitem, sizeof(*s->byid), by_id);
 	qsort(s->bywhat, s->nwhat, sizeof(*s->bywhat), by_what);
+	/* An item by two SIDs: which one names it is not known. */
+	for (i = 1; i < s->nitem; i++)
+		if (by_id(&s->byid[i - 1], &s->byid[i]) == 0)
+			return (fail(why, whylen, "%s has two SIDs, %" PRIu64
+			    " and %" PRIu64, s->byid[i]->id,
+			    s->byid[i - 1]->sid, s->byid[i]->sid));
 	/* Parents before their children, by path: each one's base. */
 	for (i = 0; i < s->nitem; i++) {
 		it = (struct cbl_ysid_item *)(uintptr_t)s->byid[i];

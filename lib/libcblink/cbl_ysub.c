@@ -380,10 +380,29 @@ datetime(const char *s, struct timespec *ts)
 	return (true);
 }
 
+/* SID sid at the end of v (*n of them, room for *cap). */
+static int
+top_add(uint64_t **v, size_t *n, size_t *cap, uint64_t sid)
+{
+	uint64_t *nv;
+
+	if (*n == *cap) {
+		if ((nv = reallocarray(*v, *cap + 16, sizeof(*nv))) == NULL)
+			return (ENOMEM);
+		*v = nv;
+		*cap += 16;
+	}
+	(*v)[(*n)++] = sid;
+	return (0);
+}
+
 /*
  * The top-level nodes a period reads: a subtree filter's, those the
  * filter's paths begin with ("/module:name"), or every one the server
- * reads where a path does not begin so.
+ * reads where a path does not begin so.  Made apart and put in place,
+ * array and count together, at the end: sub->top is replaced, never
+ * changed, so a thread that took it (read_filtered()) reads it whole;
+ * the one replaced is the caller's to retire or free.
  */
 static int
 targets(struct cbl_ysub *sub)
@@ -392,33 +411,22 @@ targets(struct cbl_ysub *sub)
 	const struct cbl_ynode *n;
 	char *x, *p, *e, *mod, *name;
 	bool all = sub->xpath == NULL && sub->subtree == NULL;
-	size_t cap = 0;
-	int depth;
+	uint64_t *v = NULL;
+	size_t nv = 0, cap = 0;
+	int depth, error = 0;
 
-	sub->ntop = 0;
 	if (sub->subtree != NULL) {
-		for (size_t i = 0; (n = cbl_dfilter_top(sub->subtree, i)) !=
-		    NULL; i++) {
-			if (!cbl_yis_top_data(n))
-				continue;
-			if (sub->ntop == cap) {
-				uint64_t *v = reallocarray(sub->top, cap + 4,
-				    sizeof(*v));
-
-				if (v == NULL)
-					return (ENOMEM);
-				sub->top = v;
-				cap += 4;
-			}
-			sub->top[sub->ntop++] = n->sid;
-		}
-		return (0);
+		for (size_t i = 0; error == 0 && (n =
+		    cbl_dfilter_top(sub->subtree, i)) != NULL; i++)
+			if (cbl_yis_top_data(n))
+				error = top_add(&v, &nv, &cap, n->sid);
+		goto out;
 	}
 	if ((x = sub->xpath != NULL ? strdup(sub->xpath) : NULL) == NULL &&
 	    sub->xpath != NULL)
 		return (ENOMEM);
 	/* Each path of a union, at its top level. */
-	for (p = x; !all && p != NULL; p = e) {
+	for (p = x; !all && error == 0 && p != NULL; p = e) {
 		for (e = p, depth = 0; *e != '\0'; e++) {
 			if (*e == '[' || *e == '(')
 				depth++;
@@ -450,41 +458,26 @@ targets(struct cbl_ysub *sub)
 			all = true;
 			break;
 		}
-		if (sub->ntop == cap) {
-			uint64_t *v = reallocarray(sub->top, cap + 4,
-			    sizeof(*v));
-
-			if (v == NULL) {
-				free(x);
-				return (ENOMEM);
-			}
-			sub->top = v;
-			cap += 4;
-		}
-		sub->top[sub->ntop++] = n->sid;
+		error = top_add(&v, &nv, &cap, n->sid);
 	}
 	free(x);
-	if (!all)
-		return (0);
-	free(sub->top);
-	sub->top = NULL;
-	sub->ntop = cap = 0;
-	for (uint32_t i = 0; i < srv->nhandler; i++) {
+	if (!all || error != 0)
+		goto out;
+	nv = 0;
+	for (uint32_t i = 0; error == 0 && i < srv->nhandler; i++) {
 		n = cbl_yschema_node(srv->schema, srv->handler[i].sid);
 		if (srv->handler[i].get == NULL || n == NULL ||
 		    !cbl_yis_top_data(n))
 			continue;
-		if (sub->ntop == cap) {
-			uint64_t *v = reallocarray(sub->top, cap + 16,
-			    sizeof(*v));
-
-			if (v == NULL)
-				return (ENOMEM);
-			sub->top = v;
-			cap += 16;
-		}
-		sub->top[sub->ntop++] = n->sid;
+		error = top_add(&v, &nv, &cap, n->sid);
 	}
+out:
+	if (error != 0) {
+		free(v);
+		return (error);
+	}
+	sub->top = v;
+	sub->ntop = nv;
 	return (0);
 }
 
@@ -942,23 +935,35 @@ filtered(const struct cbl_ysub *sub)
 static cbl_dtree *
 read_filtered(struct cbl_ysub *sub, bool *incomplete)
 {
+	const uint64_t *top;
+	size_t ntop;
 	struct cbl_req r;
 	cbl_dtree *t = NULL, *ft = NULL;
 	char why[160];
 
 	*incomplete = false;
+	/* The nodes to read, array and count as one: a modify replaces
+	 * them meanwhile, the old ones retired, not freed. */
+	pthread_mutex_lock(&sub->ctx->ysublock);
+	top = sub->top;
+	ntop = sub->ntop;
+	pthread_mutex_unlock(&sub->ctx->ysublock);
 	memset(&r, 0, sizeof(r));
 	r.conn = sub_conn(sub);
 	r.user = sub->user;
 	r.recovery = sub->recovery;
 	atomic_init(&r.refs, 1);
-	if (cbl_yread_tree(&r, sub->top, sub->ntop, &t, incomplete) != 0)
+	if (cbl_yread_tree(&r, top, ntop, &t, incomplete) != 0)
 		*incomplete = true;
 	free(r.err_msg);
-	/* What the subscriber may not read is no part of it. */
+	/* What the subscriber may not read is no part of it: none of it,
+	 * where what may not be cannot be taken out. */
 	if (t != NULL && cbl_ynacm_read(sub->ctx, r.conn, &(struct cbl_ywho){
-	    sub->user, sub->recovery }, t) != 0)
+	    sub->user, sub->recovery }, t) != 0) {
+		cbl_dtree_free(t);
 		*incomplete = true;
+		return (NULL);
+	}
 	if (t == NULL || !filtered(sub))
 		return (t);
 	ft = filter(sub, t, why, sizeof(why));
@@ -2409,6 +2414,7 @@ cbl_ysub_modify(cbl_req *req, const void *in)
 			if (sub->stream == NULL) {
 				(void)retire(sub, sub->top);
 				sub->top = NULL;
+				sub->ntop = 0;
 				error = targets(sub);
 			}
 		}

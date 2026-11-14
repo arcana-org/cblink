@@ -257,6 +257,44 @@ ATF_TC_BODY(refused, tc)
 	free(big);
 }
 
+/*
+ * Nested counts multiply in regcomp(3), which copies a counted atom as
+ * often as its count says: refused when the ERE expanded would be over
+ * CBL_PAT_MAX_EXPANDED, at the count that takes it over; the same counts
+ * flat, added rather than multiplied, likewise; large patterns below the
+ * bound still compiled.
+ */
+ATF_TC_WITHOUT_HEAD(expanded);
+ATF_TC_BODY(expanded, tc)
+{
+	char *flat;
+	regex_t re;
+	char why[256];
+	size_t pos;
+
+	check_refused("((a{255}){255}){255}", 9, "expands its counts");
+	check_refused("(((a{255}){255}){255}){255}", 10, "expands its counts");
+	check_refused("(a{2,}){255}x{255}([b-c]{100}){100}", 30,
+	    "expands its counts");
+	flat = malloc(200 * 6 + 1);
+	ATF_REQUIRE(flat != NULL);
+	for (int i = 0; i < 200; i++)
+		memcpy(flat + i * 6, "a{255}", 6);
+	flat[200 * 6] = '\0';
+	check_refused(flat, 128 * 6, "expands its counts");
+	flat[100 * 6] = '\0';
+	ATF_CHECK_MSG(cbl_pattern_compile(flat, &re, why, sizeof(why),
+	    &pos) == 0, "%s at %zu", why, pos);
+	cbl_pattern_free(&re);
+	free(flat);
+	ATF_CHECK_MSG(cbl_pattern_compile("(a{100}){100}", &re, why,
+	    sizeof(why), &pos) == 0, "%s at %zu", why, pos);
+	ATF_CHECK(cbl_pattern_match(&re, "aaaa") == false);
+	cbl_pattern_free(&re);
+	/* Unbounded repetition copies nothing. */
+	check_ere("((a*)+){1,}", "^(((a*)+){1,})$");
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -265,5 +303,6 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, unicode);
 	ATF_TP_ADD_TC(tp, corpus);
 	ATF_TP_ADD_TC(tp, refused);
+	ATF_TP_ADD_TC(tp, expanded);
 	return (atf_no_error());
 }

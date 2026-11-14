@@ -1400,9 +1400,9 @@ enc_json(struct xc *x, const struct cbl_ytype *t, const char *ctxmod,
 		    t->kind != CBL_YT_UNION))
 			return (fail(x, "invalid-value", "a number with a "
 			    "fraction, not of its type"));
-		(void)snprintf(num, sizeof(num), "%.*f", t->kind ==
-		    CBL_YT_DECIMAL64 ? t->fdigits : 6, strtod(v->s, NULL));
-		s = num;
+		/* The number's text as it is: decimal64's mantissa reads
+		 * it, digit for digit, never through a double. */
+		s = v->s;
 		break;
 	case CBL_JBOOL:
 	case CBL_JSTR:
@@ -1455,7 +1455,7 @@ enc_json(struct xc *x, const struct cbl_ytype *t, const char *ctxmod,
 }
 
 /* The child path of item it a member's name says: "name" of its module,
- * else "module:name". */
+ * else "module:name".  One name, never a path: no "/", none empty. */
 static const struct cbl_ysid_item *
 child_item(const struct cbl_ysids *s, const struct cbl_ysid_item *it,
     const char *key, bool mount)
@@ -1464,6 +1464,10 @@ child_item(const struct cbl_ysids *s, const struct cbl_ysid_item *it,
 	const char	*colon = strchr(key, ':');
 	int		 n;
 
+	if (key[0] == '\0' || strchr(key, '/') != NULL || colon == key ||
+	    (colon != NULL && (colon[1] == '\0' || strchr(colon + 1, ':') !=
+	    NULL)))
+		return (NULL);
 	if (it == NULL || mount) {
 		if (colon == NULL)
 			return (NULL);
@@ -1481,6 +1485,14 @@ child_item(const struct cbl_ysids *s, const struct cbl_ysid_item *it,
 static int	enc_node(struct xc *, const struct cbl_ysid_item *,
 		    const struct cbl_jv *);
 
+static int
+sid_cmp(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+
+	return (x < y ? -1 : x > y);
+}
+
 /* Object v's members, children of it: a map. */
 static int
 enc_object(struct xc *x, const struct cbl_ysid_item *it,
@@ -1490,7 +1502,8 @@ enc_object(struct xc *x, const struct cbl_ysid_item *it,
 	const struct cbl_ysid_item	*c;
 	const struct cbl_jv		*m;
 	const char			*key, *colon;
-	uint64_t			 cnt = 0;
+	uint64_t			 cnt = 0, *seen;
+	size_t				 nseen = 0;
 	int				 error;
 	bool				 mount = n != NULL && (n->flags &
 					    CBL_YNF_MOUNT) != 0;
@@ -1504,13 +1517,21 @@ enc_object(struct xc *x, const struct cbl_ysid_item *it,
 		cnt += v->v[i].key[0] != '@';
 	if ((error = cbl_ybuf_head(x->b, 5, cnt)) != 0)
 		return (error);
-	for (size_t i = 0; i < v->n; i++) {
+	/* The children named, each once ("m:x" and "x" are one). */
+	if ((seen = calloc(v->n + 1, sizeof(*seen))) == NULL)
+		return (ENOMEM);
+	error = 0;
+	for (size_t i = 0; i < v->n && error == 0; i++) {
 		m = &v->v[i];
 		key = m->key;
 		/* Annotations (RFC 7952): passed over. */
 		if (key[0] == '@')
 			continue;
 		if ((c = child_item(x->s, it, key, mount)) == NULL) {
+			free(seen);
+			if (key[0] == '\0' || strchr(key, '/') != NULL)
+				return (fail(x, "malformed-message", "\"%s\": "
+				    "not a member name", key));
 			colon = strchr(key, ':');
 			if ((it == NULL || mount) && colon == NULL)
 				return (fail(x, "malformed-message", "%s: a "
@@ -1530,16 +1551,32 @@ enc_object(struct xc *x, const struct cbl_ysid_item *it,
 			    "node", it != NULL ? it->id : "", it != NULL ? "/" :
 			    "", key));
 		}
+		seen[nseen++] = c->sid;
+		/* A delta from the node this map is of: its SID, an rpc's
+		 * or an action's for its input or output. */
 		if (it == NULL)
 			error = cbl_ybuf_head(x->b, 0, c->sid);
 		else if (mount) {
 			if ((error = cbl_ybuf_head(x->b, 6, 47)) == 0)
 				error = cbl_ybuf_head(x->b, 0, c->sid);
 		} else
-			error = put_int(x->b, (int64_t)(c->sid - c->base));
-		if (error != 0 || (error = enc_node(x, c, m)) != 0)
-			return (error);
+			error = put_int(x->b, (int64_t)(c->sid - (it->io ?
+			    it->base : it->sid)));
+		if (error == 0)
+			error = enc_node(x, c, m);
 	}
+	if (error == 0) {
+		qsort(seen, nseen, sizeof(*seen), sid_cmp);
+		for (size_t i = 1; i < nseen && error == 0; i++)
+			if (seen[i] == seen[i - 1])
+				error = fail(x, "malformed-message", "%s: a "
+				    "member twice, by two names",
+				    cbl_ysids_sid(x->s, seen[i]) != NULL ?
+				    cbl_ysids_sid(x->s, seen[i])->id : "?");
+	}
+	free(seen);
+	if (error != 0)
+		return (error);
 	x->depth--;
 	return (0);
 }

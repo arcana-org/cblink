@@ -855,12 +855,40 @@ struct yedit {
 	struct cbl_yfound	 f;
 	void		*before;
 	void		*after;
+	const uint8_t	*raw;		/* its YANG-CBOR; NULL: deleted */
+	size_t		 len;
 };
+
+static int
+check_running(cbl_req *req, const struct yedit *e, size_t n)
+{
+	const struct cbl_ynode **v;
+	const uint8_t **p;
+	size_t *len;
+	int error = ENOMEM;
+
+	v = calloc(n, sizeof(*v));
+	p = calloc(n, sizeof(*p));
+	len = calloc(n, sizeof(*len));
+	if (v != NULL && p != NULL && len != NULL) {
+		for (size_t i = 0; i < n; i++) {
+			v[i] = e[i].f.n;
+			p[i] = e[i].raw;
+			len[i] = e[i].len;
+		}
+		error = cbl_yds_check_running(req, v, p, len, n);
+	}
+	free(v);
+	free(p);
+	free(len);
+	return (error);
+}
 
 /*
  * EDIT: each node's new value decoded and its present one read first, so
- * a bad request changes nothing; then the edits in SID order, those done
- * undone if one fails.
+ * a bad request changes nothing; then held, with the rest of running, to
+ * the whens, musts and references (as a commit is); then the edits in
+ * SID order, those done undone if one fails.
  */
 static int
 y_edit_now(cbl_req *req, const cbl_msg *msg, void *arg __unused)
@@ -922,6 +950,8 @@ y_edit_now(cbl_req *req, const cbl_msg *msg, void *arg __unused)
 		raw = msg->buf + msg->hdr.hdrlen + at->off;
 		/* null: deleted, after it nothing. */
 		if (!(at->len == 1 && raw[0] == 0xf6)) {
+			e[n].raw = raw;
+			e[n].len = at->len;
 			if ((error = cbl_ydecode_member(e[n].f.n, raw, at->len,
 			    e[n].after, a, CBL_YD_STRICT, why,
 			    sizeof(why))) != 0) {
@@ -929,8 +959,11 @@ y_edit_now(cbl_req *req, const cbl_msg *msg, void *arg __unused)
 				    why);
 				break;
 			}
-			/* Configuration, valid as RFC 7950 has it. */
+			/* Configuration, valid as RFC 7950 has it; NACM's
+			 * rules, paths that compile. */
 			if ((error = cbl_yvalid_member(req, e[n].f.n,
+			    e[n].after)) != 0 ||
+			    (error = cbl_ynacm_check_rules(req, e[n].f.n,
 			    e[n].after)) != 0)
 				break;
 		}
@@ -945,6 +978,10 @@ y_edit_now(cbl_req *req, const cbl_msg *msg, void *arg __unused)
 	/* NACM's, every node changed, before any is. */
 	for (size_t i = 0; error == 0 && i < n; i++)
 		error = cbl_ynacm_write(req, e[i].f.n, e[i].before, e[i].after);
+	/* Running as it would be, whole: its whens, musts and references,
+	 * as a commit of the candidate holds it to. */
+	if (error == 0 && n > 0)
+		error = check_running(req, e, n);
 	for (done = 0; error == 0 && done < n; done++) {
 		req->yarg = e[done].f.arg;
 		if ((error = e[done].f.h->edit(req, e[done].before,
@@ -999,11 +1036,10 @@ io_of(const struct cbl_ynode *rpc, int kind)
  */
 static int
 action_target(cbl_req *req, const cbl_msg *msg, const struct cbl_yserver *srv,
-    const struct cbl_ynode *act, struct cblink_action *ac, cbl_yarena *a)
+    const struct cbl_ynode *act, struct cblink_action *ac, const void ***vals,
+    size_t *nvals, cbl_yarena *a)
 {
 	const struct cbl_ynode *n;
-	const void **vals;
-	size_t nvals;
 	char why[128];
 	int error;
 
@@ -1013,7 +1049,7 @@ action_target(cbl_req *req, const cbl_msg *msg, const struct cbl_yserver *srv,
 		return (cbl_ysay(req, error == ENOENT ? EINVAL : error, act->sid,
 		    "missing-element", error == ENOENT ? "an action needs "
 		    "its target (cblink:action)" : why));
-	if (cbl_yiid_read(srv->schema, &ac->target, &n, &vals, &nvals,
+	if (cbl_yiid_read(srv->schema, &ac->target, &n, vals, nvals,
 	    a) != 0 || n != act->parent)
 		return (cbl_ysay(req, EINVAL, act->sid, "bad-element",
 		    "the target is no instance of the action's node"));
@@ -1025,6 +1061,9 @@ y_rpc_now(cbl_req *req, const cbl_msg *msg, void *arg __unused)
 {
 	const cbl_attr *body = cbl_msg_body(msg), *at = NULL;
 	const struct cbl_ynode *in, *out;
+	struct cblink_action ac;
+	const void **tvals = NULL;
+	size_t ntvals = 0;
 	struct cbl_yfound f;
 	cbl_msg *reply;
 	void *pin, *pout;
@@ -1062,14 +1101,27 @@ y_rpc_now(cbl_req *req, const cbl_msg *msg, void *arg __unused)
 		return (cbl_ysay(req, EOPNOTSUPP, sid, "operation-not-supported",
 		    f.n->kind == CBL_YN_RPC ? "the rpc is not served" :
 		    "the action is not served"));
-	if ((error = cbl_ynacm_exec(req, f.n)) != 0)
-		return (error);
-	if ((in = io_of(f.n, CBL_YN_INPUT)) == NULL ||
-	    (out = io_of(f.n, CBL_YN_OUTPUT)) == NULL)
-		return (cbl_ysay(req, EOPNOTSUPP, sid, "operation-not-supported",
-		    "the rpc's tables have no input or output"));
 	if ((a = cbl_yarena_new()) == NULL)
 		return (ENOMEM);
+	/* An action's exec is of its target, the instance it acts on:
+	 * NACM's path rules hold their keys to its. */
+	if (f.n->kind == CBL_YN_ACTION) {
+		if ((error = action_target(req, msg, f.srv, f.n, &ac, &tvals,
+		    &ntvals, a)) == 0)
+			error = cbl_ynacm_exec(req, f.n, f.n->parent, tvals,
+			    ntvals);
+	} else
+		error = cbl_ynacm_exec(req, f.n, NULL, NULL, 0);
+	if (error != 0) {
+		cbl_yarena_free(a);
+		return (error);
+	}
+	if ((in = io_of(f.n, CBL_YN_INPUT)) == NULL ||
+	    (out = io_of(f.n, CBL_YN_OUTPUT)) == NULL) {
+		cbl_yarena_free(a);
+		return (cbl_ysay(req, EOPNOTSUPP, sid, "operation-not-supported",
+		    "the rpc's tables have no input or output"));
+	}
 	if ((pin = cbl_yarena_alloc(a, in->size)) == NULL ||
 	    (pout = cbl_yarena_alloc(a, out->size)) == NULL) {
 		cbl_yarena_free(a);
@@ -1086,13 +1138,9 @@ y_rpc_now(cbl_req *req, const cbl_msg *msg, void *arg __unused)
 		return (error);
 	}
 	req->yarg = f.arg;
-	if (f.n->kind == CBL_YN_ACTION) {
-		struct cblink_action ac;
-
-		/* The node it acts on: an instance of its parent. */
-		if ((error = action_target(req, msg, f.srv, f.n, &ac, a)) == 0)
-			error = f.h->action(req, &ac.target, pin, pout, a);
-	} else
+	if (f.n->kind == CBL_YN_ACTION)
+		error = f.h->action(req, &ac.target, pin, pout, a);
+	else
 		error = f.h->rpc(req, pin, pout, a);
 	if (error != 0) {
 		cbl_yarena_free(a);

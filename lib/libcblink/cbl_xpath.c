@@ -207,7 +207,8 @@ lex(struct xp_parser *p, const char *e)
 			}
 			if ((t = push(p, T_LITERAL, i)) == NULL)
 				return;
-			t->s = dupn(p, e + i + 1, j - i - 1);
+			if ((t->s = dupn(p, e + i + 1, j - i - 1)) == NULL)
+				return;
 			i = j + 1;
 			continue;
 		case '/':
@@ -276,6 +277,9 @@ lex(struct xp_parser *p, const char *e)
 				j = k;
 			} else
 				t->s = dupn(p, e + i + 1, j - i - 1);
+			/* Out of memory: no name to go on with. */
+			if (p->failed)
+				return;
 			i = j;
 			continue;
 		case '.':
@@ -345,7 +349,8 @@ lex(struct xp_parser *p, const char *e)
 		if ((t = push(p, T_NAMETEST, i)) == NULL)
 			return;
 		if (e[j] == ':' && e[j + 1] == '*') {
-			t->prefix = dupn(p, e + i, j - i);
+			if ((t->prefix = dupn(p, e + i, j - i)) == NULL)
+				return;
 			i = j + 2;
 			continue;
 		}
@@ -357,6 +362,8 @@ lex(struct xp_parser *p, const char *e)
 			j = k;
 		} else
 			t->s = dupn(p, e + i, j - i);
+		if (p->failed)
+			return;
 		i = j;
 		k = skip_ws(e, i);
 		if (e[k] == '(') {

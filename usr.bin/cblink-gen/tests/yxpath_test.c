@@ -596,6 +596,192 @@ ATF_TC_BODY(budget, tc)
 	cbl_dtree_free(t);
 }
 
+/* top with n interfaces, each a long name and an MTU, none equal. */
+static cbl_dtree *
+big(int n)
+{
+	cbl_dtree *t;
+	cbl_dnode *top, *ifc;
+	char name[64];
+
+	ATF_REQUIRE((t = cbl_dtree_new(&yangh_schema)) != NULL);
+	ATF_REQUIRE_EQ(0, cbl_dnode_add(cbl_dtree_root(t),
+	    sn("edits", "top"), NULL, &top));
+	for (int i = 0; i < n; i++) {
+		uint32_t mtu = (uint32_t)i;
+
+		snprintf(name, sizeof(name),
+		    "interface-%06d-abcdefghijklmnopqrstu", i);
+		ifc = entry(top, sn("edits", "top/interface"), name);
+		ATF_REQUIRE_EQ(0, cbl_dnode_add(ifc,
+		    sn("edits", "top/interface/mtu"), &mtu, NULL));
+	}
+	return (t);
+}
+
+static int
+eval_timed(cbl_dtree *t, const char *expr, struct cbl_xval *v, char *why,
+    size_t whylen, double *secs)
+{
+	struct timespec a, b;
+	int error;
+
+	clock_gettime(CLOCK_MONOTONIC, &a);
+	error = cbl_xp_eval(t, expr, NULL, NULL, v, why, whylen);
+	clock_gettime(CLOCK_MONOTONIC, &b);
+	*secs = (double)(b.tv_sec - a.tv_sec) + (b.tv_nsec - a.tv_nsec) / 1e9;
+	return (error);
+}
+
+/*
+ * Two node sets compared pair by pair: each pair is work, 6000 x 6000
+ * of them over the budget, refused, and soon; 300 x 300 done.
+ */
+ATF_TC(budget_pairs);
+ATF_TC_HEAD(budget_pairs, tc)
+{
+
+	atf_tc_set_md_var(tc, "timeout", "120");
+}
+ATF_TC_BODY(budget_pairs, tc)
+{
+	struct cbl_xval v;
+	cbl_dtree *t = big(6000);
+	char why[128];
+	double secs;
+
+	ATF_CHECK_EQ(EFBIG, eval_timed(t, "/edits:top/edits:interface/"
+	    "edits:mtu = /edits:top/edits:interface/edits:name", &v, why,
+	    sizeof(why), &secs));
+	ATF_CHECK_STREQ("too much to evaluate", why);
+	ATF_CHECK_MSG(secs < 10, "%.1f s", secs);
+	cbl_dtree_free(t);
+	t = big(300);
+	ATF_CHECK_EQ(0, eval_timed(t, "/edits:top/edits:interface/edits:mtu "
+	    "< /edits:top/edits:interface/edits:name", &v, why, sizeof(why),
+	    &secs));
+	ATF_CHECK(v.kind == CBL_XV_BOOL && !v.b);
+	cbl_xval_free(&v);
+	cbl_dtree_free(t);
+}
+
+/*
+ * String functions read their strings once: translate() and substring()
+ * of the whole tree's string (over 200 000 characters), linear; and each
+ * character read is work, so the same per node is refused.
+ */
+ATF_TC(budget_strings);
+ATF_TC_HEAD(budget_strings, tc)
+{
+
+	atf_tc_set_md_var(tc, "timeout", "120");
+}
+ATF_TC_BODY(budget_strings, tc)
+{
+	static const char *const per_node[] = {
+		"count(//*[translate(string(/), 'a', 'b') = 'z'])",
+		"count(//*[substring(string(/), 100000, 2) = 'z'])",
+		"count(//*[string-length(string(/)) = 0])",
+		"count(//*[contains(string(/), 'zz')])",
+		"count(//*[concat(string(/), 'x') = 'z'])",
+	};
+	struct cbl_xval v;
+	cbl_dtree *t = big(5000);
+	char why[128];
+	double secs;
+
+	ATF_REQUIRE_EQ_MSG(0, eval_timed(t, "string-length(translate("
+	    "string(/), 'abcdefghij', 'ABCDEFGHI'))", &v, why, sizeof(why),
+	    &secs), "%s", why);
+	ATF_CHECK(v.kind == CBL_XV_NUMBER && v.num > 200000);
+	ATF_CHECK_MSG(secs < 5, "translate: %.1f s", secs);
+	cbl_xval_free(&v);
+	ATF_REQUIRE_EQ_MSG(0, eval_timed(t, "substring(string(/), 200000, 4)",
+	    &v, why, sizeof(why), &secs), "%s", why);
+	ATF_CHECK(v.kind == CBL_XV_STRING && strlen(v.s) == 4);
+	ATF_CHECK_MSG(secs < 5, "substring: %.1f s", secs);
+	cbl_xval_free(&v);
+	check_str(t, "translate('a\xc3\xa9" "b\xc3\xa9" "c', '\xc3\xa9" "ba', "
+	    "'E\xc3\xa0')", NULL, "E\xc3\xa0" "Ec");
+	for (size_t i = 0; i < sizeof(per_node) / sizeof(per_node[0]); i++) {
+		ATF_CHECK_EQ_MSG(EFBIG, eval_timed(t, per_node[i], &v, why,
+		    sizeof(why), &secs), "%s", per_node[i]);
+		ATF_CHECK_MSG(secs < 10, "%s: %.1f s", per_node[i], secs);
+	}
+	cbl_dtree_free(t);
+}
+
+/*
+ * re-match(): a pattern whose counts multiply refused, not compiled; a
+ * large one compiled once, not once a node (5000 nodes here).
+ */
+ATF_TC(budget_rematch);
+ATF_TC_HEAD(budget_rematch, tc)
+{
+
+	atf_tc_set_md_var(tc, "timeout", "120");
+}
+ATF_TC_BODY(budget_rematch, tc)
+{
+	struct cbl_xval v;
+	cbl_dtree *t = big(5000);
+	char why[128];
+	double secs;
+
+	ATF_CHECK_EQ(EINVAL, eval_timed(t, "//*[re-match(., "
+	    "'((a{255}){255}){255}')]", &v, why, sizeof(why), &secs));
+	ATF_CHECK_MSG(strstr(why, "re-match()") != NULL, "%s", why);
+	ATF_REQUIRE_EQ_MSG(0, eval_timed(t, "count(//edits:mtu[re-match(., "
+	    "'([0-9a-f]{1,40}){1,40}x')])", &v, why, sizeof(why), &secs),
+	    "%s", why);
+	ATF_CHECK(v.kind == CBL_XV_NUMBER && v.num == 0);
+	ATF_CHECK_MSG(secs < 3, "%.1f s", secs);
+	cbl_xval_free(&v);
+	cbl_dtree_free(t);
+}
+
+/*
+ * A node whose decode fails part way (here cut short in its last leaf)
+ * is not left in the tree half made: the parent as it was, so a reader
+ * that keeps a tree with what it could read never passes on a part.
+ */
+ATF_TC_WITHOUT_HEAD(decode_partial);
+ATF_TC_BODY(decode_partial, tc)
+{
+	struct cbl_ybuf b = { NULL, 0, 0 };
+	cbl_dnode *top;
+	cbl_dtree *t = running(&top), *u;
+	char why[128];
+
+	ATF_REQUIRE_EQ(0, cbl_dnode_encode(top, &b));
+	ATF_REQUIRE((u = cbl_dtree_new(&yangh_schema)) != NULL);
+	ATF_CHECK(cbl_dnode_decode(cbl_dtree_root(u), sn("edits", "top"), b.p,
+	    b.len - 1, 0, why, sizeof(why), NULL) != 0);
+	ATF_CHECK_MSG(cbl_dnode_first(cbl_dtree_root(u)) == NULL,
+	    "a half-decoded top left in the tree");
+	ATF_CHECK_EQ(0, cbl_dnode_decode(cbl_dtree_root(u), sn("edits", "top"),
+	    b.p, b.len, 0, why, sizeof(why), NULL));
+	ATF_CHECK(cbl_dnode_first(cbl_dtree_root(u)) != NULL);
+	cbl_ybuf_free(&b);
+	cbl_dtree_free(u);
+	cbl_dtree_free(t);
+}
+
+/* An instance-identifier that is not there: refused, not read. */
+ATF_TC_WITHOUT_HEAD(iid_null);
+ATF_TC_BODY(iid_null, tc)
+{
+	const struct cbl_ynode *n;
+	const void **vals;
+	size_t nvals;
+	cbl_yarena *a;
+
+	ATF_REQUIRE((a = cbl_yarena_new()) != NULL);
+	ATF_CHECK_EQ(EINVAL, cbl_yiid_read(&yangh_schema, NULL, &n, &vals,
+	    &nvals, a));
+	cbl_yarena_free(a);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -607,5 +793,10 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, refs_predicate);
 	ATF_TP_ADD_TC(tp, refused);
 	ATF_TP_ADD_TC(tp, budget);
+	ATF_TP_ADD_TC(tp, budget_pairs);
+	ATF_TP_ADD_TC(tp, budget_strings);
+	ATF_TP_ADD_TC(tp, budget_rematch);
+	ATF_TP_ADD_TC(tp, decode_partial);
+	ATF_TP_ADD_TC(tp, iid_null);
 	return (atf_no_error());
 }

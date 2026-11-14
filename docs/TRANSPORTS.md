@@ -54,8 +54,9 @@ transport it runs on. It only knows whether the transport is a byte stream
   - The default mode is `0600`. `cbl_listener_set_unix_perm()` sets the
     mode and ownership.
 - Peers are identified by `getpeereid(2)` (uid and gid). A peer counts as
-  authenticated only when the listener has `CBL_LF_UNIX_TRUSTED`. That
-  flag says: filesystem permissions are the access control.
+  authenticated only when the listener has `CBL_LF_UNIX_TRUSTED` and
+  its credentials are known. That flag says: filesystem permissions are
+  the access control.
 
 ## 3. SCTP
 

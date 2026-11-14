@@ -421,6 +421,7 @@ conn_flush(cbl_conn *conn)
 		conn->tx_control = e->control;
 		if (e->off == 0 && conn->ops->frame_start != NULL)
 			conn->ops->frame_start(conn, e->msg->buf, e->msg->len);
+		e->begun = true;
 		error = conn->ops->write(conn, e->msg->buf + e->off,
 		    e->msg->len - e->off, &put);
 		if (error == EAGAIN) {
@@ -462,7 +463,7 @@ txq_insert(cbl_conn *conn, struct cbl_txent *e)
 		return;
 	}
 	STAILQ_FOREACH(at, &conn->txq, link) {
-		if (!at->control && at->off == 0)
+		if (!at->control && at->off == 0 && !at->begun)
 			break;
 		prev = at;
 	}
@@ -775,8 +776,11 @@ cbl_conn_bad_header(cbl_conn *conn, int error, const struct cbl_hdr *h)
 		return (false);
 	}
 	cbl_conn_seterr(conn, error, "protocol error: %s", strerror(error));
+	/* Closing, unless the error's own send already closed it: a
+	 * connection torn down is never brought back to be torn again. */
 	pthread_mutex_lock(&conn->mtx);
-	conn_closing(conn);
+	if (conn->state == CBL_CS_OPEN)
+		conn_closing(conn);
 	pthread_mutex_unlock(&conn->mtx);
 	return (false);
 }
@@ -841,10 +845,14 @@ conn_parse_ring(cbl_conn *conn, int *budget)
 			return (0);
 		}
 		avail = conn->rx_end - conn->rx_start;
+		/* What is skipped spends the budget as frames do: a peer
+		 * sending only bad frames does not keep the thread. */
 		if (conn->discard > 0) {
 			n = avail < conn->discard ? avail : conn->discard;
 			conn->rx_start += n;
 			conn->discard -= n;
+			if (n > 0)
+				(*budget)--;
 			if (conn->discard > 0)
 				return (0);
 			continue;
@@ -858,6 +866,7 @@ conn_parse_ring(cbl_conn *conn, int *budget)
 				return (0);
 			conn->rx_start += CBL_HDRLEN;
 			conn->discard = h.length - CBL_HDRLEN;
+			(*budget)--;
 			continue;
 		}
 		if ((frame = malloc(h.length)) == NULL)
@@ -943,7 +952,11 @@ conn_read(cbl_conn *conn)
 		return (error);
 	while (budget > 0 && conn->state == CBL_CS_OPEN) {
 		if (conn_rx_paused(conn)) {
-			conn->rx_pending = conn->rx_end > conn->rx_start;
+			/* Read again once resumed: what the ring holds, and
+			 * what the transport holds that no event tells of. */
+			conn->rx_pending = conn->rx_end > conn->rx_start ||
+			    (conn->ops->pending != NULL &&
+			    conn->ops->pending(conn));
 			return (0);
 		}
 		if (conn->big != NULL) {
@@ -1381,7 +1394,12 @@ req_issue(cbl_conn *conn, cbl_msg *req, struct cbl_pending *p,
 		return (EINVAL);
 	}
 	req->hdr.flags |= CBL_F_REQUEST | CBL_F_ACK;
-	atomic_init(&p->refs, 1);
+	/*
+	 * An asynchronous request's completion holds a reference, run on
+	 * whichever thread the connection dies on; the issuer holds its
+	 * own until it is done with p here.
+	 */
+	atomic_init(&p->refs, async ? 2 : 1);
 	p->dump = (req->hdr.flags & CBL_F_DUMP) != 0;
 	p->deadline = cbl_now_ms() + (timeout_ms >= 0 ? (uint64_t)timeout_ms :
 	    conn->lim.v[CBL_LIM_REQUEST_MS]);
@@ -1394,8 +1412,8 @@ req_issue(cbl_conn *conn, cbl_msg *req, struct cbl_pending *p,
 		conn->pend_dirty = true;
 	} while (dup != NULL);
 	conn->npending++;
-	pthread_mutex_unlock(&conn->mtx);
 	req->hdr.seq = p->seq;
+	pthread_mutex_unlock(&conn->mtx);
 	if ((error = cbl_conn_enqueue(conn, req)) != 0) {
 		pthread_mutex_lock(&conn->mtx);
 		if (!(done = p->done)) {
@@ -1406,12 +1424,18 @@ req_issue(cbl_conn *conn, cbl_msg *req, struct cbl_pending *p,
 		pthread_mutex_unlock(&conn->mtx);
 		/*
 		 * Completed meanwhile (the connection died on another
-		 * thread): its callback has the error, and owns "p" now.
+		 * thread): its callback has the error, and frees "p" with
+		 * the last reference.  Not completed: nobody else has it,
+		 * and the caller frees it.
 		 */
-		if (done && async)
+		if (done && async) {
+			pend_rele(p);
 			return (0);
+		}
 		return (error);
 	}
+	if (async)
+		pend_rele(p);
 	return (0);
 }
 

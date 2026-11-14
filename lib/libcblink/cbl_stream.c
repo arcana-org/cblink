@@ -677,29 +677,45 @@ cbl_stream_rx_malformed(cbl_conn *conn, const struct cbl_hdr *h, int error)
 	cbl_stream_reap(conn);
 }
 
+static void	stream_rx_on(cbl_conn *, cbl_stream *, cbl_msg *);
+
 /*
  * One stream frame.  Streams that end here, or in a callback run from
- * here, are finished by the caller once this returns.
+ * here, are finished by the caller once this returns.  The stream is
+ * held meanwhile: a callback that frees or closes the connection
+ * finishes it at once (cbl_conn_fail()), and what follows the callback
+ * here still looks at it.
  */
 static void
 stream_rx(cbl_conn *conn, cbl_msg *msg)
 {
 	uint32_t f = msg->hdr.flags, id = msg->hdr.stream;
 	cbl_stream *s;
-	uint64_t v;
-	bool found, writable = false, end = false, rx_end = false;
-	int code;
 
 	pthread_mutex_lock(&conn->mtx);
 	s = stream_find(conn, id);
 	if (s != NULL && (s->ending || s->state == CBL_SS_DONE))
 		s = NULL;
+	if (s != NULL)
+		cbl_stream_ref(s);
 	pthread_mutex_unlock(&conn->mtx);
 	if (s == NULL) {
 		stream_unknown(conn, id, f);
 		cbl_msg_free(msg);
 		return;
 	}
+	stream_rx_on(conn, s, msg);
+	cbl_stream_rele(s);
+}
+
+static void
+stream_rx_on(cbl_conn *conn, cbl_stream *s, cbl_msg *msg)
+{
+	uint32_t f = msg->hdr.flags;
+	uint64_t v;
+	bool found, writable = false, end = false, rx_end = false;
+	int code;
+
 	if (s->family != msg->hdr.family || s->cmd != msg->hdr.cmd) {
 		reset_and_end(s, EPROTO, "family/command mismatch");
 		cbl_msg_free(msg);

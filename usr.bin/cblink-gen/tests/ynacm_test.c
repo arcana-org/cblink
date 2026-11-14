@@ -14,7 +14,8 @@
  * in group limited, which may not ping, and may change an item named
  * after them; carol in no group.  Read and exec are permitted by
  * default, write is not; what nacmdemo marks nacm:default-deny-all or
- * -write is held back but by the admin's rule.
+ * -write is held back but by the admin's rule.  Some cases put rules of
+ * their own in the limited group's place (custom()).
  */
 
 #include <atf-c.h>
@@ -28,7 +29,8 @@
 #include "ynacmh.h"
 
 static const struct cbl_ynode *n_data, *n_locked, *n_ping, *n_echo, *n_reboot;
-static const struct cbl_ynode *n_event, *n_alarm, *n_nacm;
+static const struct cbl_ynode *n_event, *n_alarm, *n_nacm, *n_item, *n_reset;
+static const struct cbl_ynode *n_changed;
 
 /* data, locked and nacm, kept as YANG-CBOR. */
 static struct kept {
@@ -211,7 +213,22 @@ static const struct cbl_family_def nd_def = {
 	.nops = nitems(nd_ops),
 };
 
-static struct cbl_yhandler handlers[6];
+static int
+reset_action(cbl_req *req, const struct cbl_bytes *target, const void *in,
+    void *out, cbl_yarena *a)
+{
+	struct nacmdemo_data_item_reset_output *o = out;
+
+	(void)req;
+	(void)target;
+	(void)in;
+	(void)a;
+	o->has_ok = true;
+	o->ok = true;
+	return (0);
+}
+
+static struct cbl_yhandler handlers[7];
 static struct cbl_yserver server = { .schema = &ynacmh_schema };
 
 static int
@@ -335,6 +352,19 @@ setup(struct fixture *f)
 	    NULL };
 	handlers[5] = (struct cbl_yhandler){ n_nacm->sid, nacm_get, nacm_edit,
 	    NULL, NULL };
+	n_item = NULL;
+	for (uint32_t i = 0; i < n_data->nchild; i++)
+		if (strcmp(n_data->child[i]->name, "item") == 0)
+			n_item = n_data->child[i];
+	ATF_REQUIRE(n_item != NULL);
+	for (uint32_t i = 0; i < n_item->nchild; i++) {
+		if (strcmp(n_item->child[i]->name, "reset") == 0)
+			n_reset = n_item->child[i];
+		if (strcmp(n_item->child[i]->name, "changed") == 0)
+			n_changed = n_item->child[i];
+	}
+	handlers[6] = (struct cbl_yhandler){ n_reset->sid, NULL, NULL, NULL,
+	    reset_action };
 	qsort(handlers, nitems(handlers), sizeof(handlers[0]), hcmp);
 	server.nhandler = nitems(handlers);
 	server.handler = handlers;
@@ -739,6 +769,359 @@ ATF_TC_BODY(notify, tc)
 	teardown(&f);
 }
 
+/*
+ * Rules of a case's own in the limited group's place: n rules, each
+ * {name, path, ops (access-operations' bits), permit}; the exec and
+ * read defaults as given.
+ */
+struct crule {
+	const char	*name;
+	const char	*path;
+	uint8_t		 ops;
+	bool		 permit;
+	bool		 anymod;	/* module-name "*", not nacmdemo */
+};
+
+static void
+custom(const struct crule *cr, size_t n, bool exec_permit)
+{
+	static const char *const admins[] = { "alice" };
+	static const char *const limited[] = { "bob", "dave" };
+	static const struct ietf_netconf_acm_nacm_groups_group g[] = {
+		{ .name = "admin", .user_name = { 1, admins } },
+		{ .name = "limited", .user_name = { 2, limited } },
+	};
+	static const struct ietf_netconf_acm_nacm_groups gs = {
+		.group = { 2, g } };
+	static const struct ietf_netconf_acm_nacm_rule_list_group ga[] = {
+		{ .which = 1, .v.m1 = "admin" } };
+	static const struct ietf_netconf_acm_nacm_rule_list_group gl[] = {
+		{ .which = 1, .v.m1 = "limited" } };
+	static uint8_t bits[8];
+	struct ietf_netconf_acm_nacm_rule_list_rule ra[] = {
+		{ .name = "permit-all", .has_module_name = true,
+		    .module_name = { .which = 0, .v.m0 = "*" },
+		    .has_access_operations = true,
+		    .access_operations = { .which = 0, .v.m0 = "*" },
+		    .has_action = true,
+		    .action = IETF_NETCONF_ACM_NACM_RULE_LIST_RULE_ACTION_PERMIT },
+	};
+	struct ietf_netconf_acm_nacm_rule_list_rule rl[8];
+	struct ietf_netconf_acm_nacm_rule_list l[] = {
+		{ .name = "admin-acl", .group = { 1, ga },
+		    .rule = { nitems(ra), ra } },
+		{ .name = "limited-acl", .group = { 1, gl },
+		    .rule = { n, rl } },
+	};
+	struct ietf_netconf_acm_nacm nacm = {
+		.has_enable_nacm = true, .enable_nacm = true,
+		.has_exec_default = true, .exec_default = exec_permit ?
+		IETF_NETCONF_ACM_NACM_EXEC_DEFAULT_PERMIT :
+		IETF_NETCONF_ACM_NACM_EXEC_DEFAULT_DENY,
+		.groups = &gs, .rule_list = { nitems(l), l },
+	};
+	struct ietf_netconf_acm d = { .nacm = &nacm };
+
+	ATF_REQUIRE(n <= nitems(rl));
+	memset(rl, 0, sizeof(rl));
+	for (size_t i = 0; i < n; i++) {
+		bits[i] = cr[i].ops;
+		rl[i] = (struct ietf_netconf_acm_nacm_rule_list_rule){
+		    .name = cr[i].name, .has_module_name = true,
+		    .module_name = cr[i].anymod ?
+		    (__typeof__(rl[i].module_name)){ .which = 0, .v.m0 = "*" } :
+		    (__typeof__(rl[i].module_name)){ .which = 1,
+		    .v.m1 = "nacmdemo" },
+		    .rule_type =
+		    IETF_NETCONF_ACM_NACM_RULE_LIST_RULE_RULE_TYPE_DATA_NODE,
+		    .path = cr[i].path, .has_access_operations = true,
+		    .access_operations = { .which = 1, .v.m1 = { &bits[i],
+		    1 } },
+		    .has_action = true,
+		    .action = cr[i].permit ?
+		    IETF_NETCONF_ACM_NACM_RULE_LIST_RULE_ACTION_PERMIT :
+		    IETF_NETCONF_ACM_NACM_RULE_LIST_RULE_ACTION_DENY };
+	}
+	ATF_REQUIRE_EQ(0, kset(2, &d));
+}
+
+#define	B_CREATE	(1u << 0)
+#define	B_READ		(1u << 1)
+#define	B_UPDATE	(1u << 2)
+#define	B_DELETE	(1u << 3)
+#define	B_EXEC		(1u << 4)
+
+/* item key's reset, as user: its errno. */
+static int
+reset(struct fixture *f, const char *user, const char *key)
+{
+	struct nacmdemo_data_item_reset_input in = { 0 };
+	struct cbl_ybuf t = { NULL, 0, 0 };
+	const void *vals[] = { &key };
+	cbl_msg *m = req(f, CBL_YCMD_RPC, user), *r = NULL;
+	int error;
+
+	ATF_REQUIRE_EQ(0, cbl_yiid_write(n_item, vals, 1, &t));
+	ATF_REQUIRE_EQ(0, cbl_msg_put_ynode(m, io(n_reset, CBL_YN_INPUT),
+	    &in));
+	ATF_REQUIRE_EQ(0, cbl_msg_put_yaction(m, t.p, t.len));
+	error = cbl_request(f->c, m, &r, 5000);
+	cbl_msg_free(r);
+	cbl_ybuf_free(&t);
+	return (error);
+}
+
+/*
+ * An action is run on an instance: a path rule's key predicates are held
+ * to its target's keys.  A deny of one item's reset, the default
+ * permitting the rest; then the default denying, a permit of the item
+ * named after the user ($USER).
+ */
+ATF_TC_WITHOUT_HEAD(action_keys);
+ATF_TC_BODY(action_keys, tc)
+{
+	static const struct crule deny_core[] = {
+		{ "deny-core-reset", "/nacmdemo:data/nacmdemo:item"
+		    "[nacmdemo:name='core']/nacmdemo:reset",
+		    B_EXEC, false, false },
+	};
+	static const struct crule own[] = {
+		{ "own-reset", "/nacmdemo:data/nacmdemo:item"
+		    "[nacmdemo:name=$USER]/nacmdemo:reset",
+		    B_EXEC, true, false },
+	};
+	struct fixture f;
+
+	setup(&f);
+	custom(deny_core, nitems(deny_core), true);
+	ATF_CHECK_EQ(EACCES, reset(&f, "bob", "core"));
+	ATF_CHECK_EQ(0, reset(&f, "bob", "edge"));
+	ATF_CHECK_EQ(0, reset(&f, "alice", "core"));
+	custom(own, nitems(own), false);
+	cbl_ynacm_changed(f.sctx);
+	ATF_CHECK_EQ(0, reset(&f, "bob", "bob"));
+	ATF_CHECK_EQ(EACCES, reset(&f, "bob", "dave"));
+	ATF_CHECK_EQ(0, reset(&f, "dave", "dave"));
+	ATF_CHECK_EQ(EACCES, call(&f, "bob", n_echo));
+	teardown(&f);
+}
+
+/*
+ * A notification of a list entry is sent without the entry's keys: a
+ * deny with key predicates is not skipped for that, it holds; the
+ * event, which no rule names, still goes.
+ */
+ATF_TC_WITHOUT_HEAD(notify_keys);
+ATF_TC_BODY(notify_keys, tc)
+{
+	static const struct crule deny_core[] = {
+		{ "deny-core-changed", "/nacmdemo:data/nacmdemo:item"
+		    "[nacmdemo:name='core']/nacmdemo:changed",
+		    B_READ, false, false },
+	};
+	struct nacmdemo_data_item_changed ch = { .what = "note" };
+	struct nacmdemo_event ev = { .what = "up" };
+	struct heard h = { 0 };
+	struct fixture f;
+	cbl_sub *sub;
+
+	setup(&f);
+	custom(deny_core, nitems(deny_core), true);
+	dflt_user = "bob";
+	ATF_REQUIRE_EQ(0, cbl_subscribe(f.c, "cblink.yang", "notify",
+	    heard_cb, &h, &sub));
+	ATF_REQUIRE_EQ(0, cbl_ynotify(f.sctx, n_changed, &ch));
+	ATF_REQUIRE_EQ(0, cbl_ynotify(f.sctx, n_event, &ev));
+	pump(&f, &h, 1);
+	ATF_CHECK_EQ(1, h.n);
+	ATF_CHECK_EQ(n_event->sid, h.sids[0]);
+	ATF_CHECK_EQ(1u, counts(&f).denied_notifications);
+	ATF_REQUIRE_EQ(0, cbl_unsubscribe(sub));
+	teardown(&f);
+}
+
+/*
+ * A path rule that does not compile (a prefix, not a module's name): a
+ * deny one denies, to its rule-list's groups and for its operations,
+ * all of its module (its module-name, nacmdemo), the other groups as
+ * they were; with module-name "*" and a path whose first step is no
+ * module, every module; cbl_ynacm_status() telling why.  A permit one
+ * never matches, told too.  An EDIT that would write either refused.
+ */
+ATF_TC_WITHOUT_HEAD(bad_path);
+ATF_TC_BODY(bad_path, tc)
+{
+	static const struct crule bad_deny[] = {
+		{ "deny-if", "/if:interfaces", B_READ | B_UPDATE, false, false },
+		{ "own-item", "/nacmdemo:data/nacmdemo:item"
+		    "[nacmdemo:name=$USER]", B_CREATE | B_UPDATE | B_DELETE,
+		    true, false },
+	};
+	static const struct crule bad_any[] = {
+		{ "deny-any", "/if:interfaces", B_READ | B_UPDATE | B_EXEC,
+		    false, true },
+	};
+	static const struct crule bad_permit[] = {
+		{ "permit-typo", "/nacmdemo:dta", B_READ, true, false },
+	};
+	struct ietf_netconf_acm_nacm_rule_list_rule rl[] = {
+		{ .name = "deny-typo", .has_module_name = true,
+		    .module_name = { .which = 0, .v.m0 = "*" },
+		    .rule_type =
+		    IETF_NETCONF_ACM_NACM_RULE_LIST_RULE_RULE_TYPE_DATA_NODE,
+		    .path = "/nacmdemo:data/nacmdemo:scret",
+		    .has_access_operations = true,
+		    .access_operations = { .which = 0, .v.m0 = "*" },
+		    .has_action = true,
+		    .action = IETF_NETCONF_ACM_NACM_RULE_LIST_RULE_ACTION_DENY },
+	};
+	struct ietf_netconf_acm_nacm_rule_list l[] = {
+		{ .name = "typo-acl", .group = { 0, NULL },
+		    .rule = { nitems(rl), rl } },
+	};
+	struct ietf_netconf_acm_nacm nacm = { .has_enable_nacm = true,
+	    .enable_nacm = true, .rule_list = { nitems(l), l } };
+	struct ietf_netconf_acm d = { .nacm = &nacm };
+	struct fixture f;
+	char why[256];
+	cbl_msg *m, *r;
+	bool pub, sec;
+	size_t items;
+
+	setup(&f);
+	ATF_CHECK_EQ(0, cbl_ynacm_status(f.sctx, why, sizeof(why)));
+	custom(bad_deny, nitems(bad_deny), true);
+	cbl_ynacm_changed(f.sctx);
+	/* The limited group: nacmdemo not read, not written; exec, which
+	 * the rule does not name, as it was. */
+	ATF_REQUIRE_EQ(0, get_data(&f, "bob", &pub, &sec, &items));
+	ATF_CHECK(!pub && !sec && items == 0);
+	ATF_CHECK_EQ(EACCES, edit_locked(&f, "bob", 9));
+	ATF_CHECK_EQ(0, call(&f, "bob", n_echo));
+	/* The other groups, and no group, as they were. */
+	ATF_REQUIRE_EQ(0, get_data(&f, "alice", &pub, &sec, &items));
+	ATF_CHECK(pub && sec && items == 1);
+	ATF_CHECK_EQ(0, edit_locked(&f, "alice", 9));
+	ATF_REQUIRE_EQ(0, get_data(&f, "carol", &pub, &sec, &items));
+	ATF_CHECK(pub && !sec);
+	ATF_CHECK_EQ(0, call(&f, NULL, n_echo));
+	ATF_CHECK_EQ(EACCES, cbl_ynacm_status(f.sctx, why, sizeof(why)));
+	ATF_CHECK_MSG(strstr(why, "deny-if") != NULL &&
+	    strstr(why, "/if:interfaces") != NULL, "%s", why);
+	/* Of no module it can tell: every module, still its group's. */
+	custom(bad_any, nitems(bad_any), true);
+	cbl_ynacm_changed(f.sctx);
+	ATF_REQUIRE_EQ(0, get_data(&f, "bob", &pub, &sec, &items));
+	ATF_CHECK(!pub && !sec && items == 0);
+	ATF_CHECK_EQ(EACCES, call(&f, "bob", n_echo));
+	ATF_CHECK_EQ(0, call(&f, "carol", n_echo));
+	ATF_CHECK_EQ(EACCES, cbl_ynacm_status(f.sctx, why, sizeof(why)));
+	custom(bad_permit, nitems(bad_permit), true);
+	cbl_ynacm_changed(f.sctx);
+	ATF_REQUIRE_EQ(0, get_data(&f, "bob", &pub, &sec, &items));
+	ATF_CHECK(pub && !sec && items == 1);
+	ATF_CHECK_EQ(EINVAL, cbl_ynacm_status(f.sctx, why, sizeof(why)));
+	ATF_CHECK_MSG(strstr(why, "permit-typo") != NULL &&
+	    strstr(why, "never matches") != NULL, "%s", why);
+	/* Written by the admin: refused, the rules as they were. */
+	rules(true);
+	cbl_ynacm_changed(f.sctx);
+	m = req(&f, CBL_YCMD_EDIT, "alice");
+	ATF_REQUIRE_EQ(0, cbl_msg_put_ymember(m, n_nacm, &d));
+	r = NULL;
+	ATF_CHECK_EQ(EINVAL, cbl_request(f.c, m, &r, 5000));
+	ATF_CHECK_MSG(r != NULL && strstr(cbl_msg_err_str(r), "deny-typo") !=
+	    NULL, "%s", r != NULL ? cbl_msg_err_str(r) : "no reply");
+	cbl_msg_free(r);
+	ATF_CHECK_EQ(0, cbl_ynacm_status(f.sctx, why, sizeof(why)));
+	ATF_REQUIRE_EQ(0, get_data(&f, "alice", &pub, &sec, &items));
+	ATF_CHECK(pub && sec);
+	teardown(&f);
+}
+
+/*
+ * A delete is checked on every node it takes away (RFC 8341 section
+ * 3.2.5): sys may be deleted, users in it may not, so sys with users
+ * is not; sys without them is.
+ */
+ATF_TC_WITHOUT_HEAD(delete_below);
+ATF_TC_BODY(delete_below, tc)
+{
+	static const struct crule rl[] = {
+		{ "keep-users", "/nacmdemo:data/nacmdemo:sys/nacmdemo:users",
+		    B_DELETE, false, false },
+		{ "sys", "/nacmdemo:data/nacmdemo:sys", B_CREATE | B_UPDATE |
+		    B_DELETE, true, false },
+	};
+	static const struct nacmdemo_data_item items[] = {
+		{ .name = "carol", .note = "c" } };
+	struct nacmdemo_data_sys_users u = { .has_n = true, .n = 1 };
+	struct nacmdemo_data_sys sy = { .users = &u }, empty = { 0 };
+	struct nacmdemo_data dd = { .public = "hi", .secret = "s3",
+	    .item = { 1, items }, .sys = &sy };
+	struct nacmdemo d = { .data = &dd };
+	struct fixture f;
+
+	setup(&f);
+	custom(rl, nitems(rl), true);
+	ATF_REQUIRE_EQ(0, kset(0, &d));
+	ATF_CHECK_EQ(EACCES, edit_data(&f, "bob", "hi", items, 1, NULL));
+	ATF_CHECK_EQ(1u, counts(&f).denied_data_writes);
+	dd.sys = &empty;
+	ATF_REQUIRE_EQ(0, kset(0, &d));
+	ATF_CHECK_EQ(0, edit_data(&f, "bob", "hi", items, 1, NULL));
+	teardown(&f);
+}
+
+/*
+ * What running had wrong before an edit, in a node the edit leaves as
+ * it was, is a warning: named to who may read the node (the admin),
+ * not to who may not (bob: hidden-ref is nacm:default-deny-all).
+ */
+ATF_TC_WITHOUT_HEAD(warning_named);
+ATF_TC_BODY(warning_named, tc)
+{
+	static const struct nacmdemo_data_item two[] = {
+		{ .name = "bob", .note = "b" }, { .name = "carol", .note = "c" } };
+	struct nacmdemo_locked l = { .hidden_ref = "gone" };
+	struct nacmdemo dl = { .locked = &l };
+	struct nacmdemo_data dd = { .public = "hi", .secret = "s3",
+	    .item = { 2, two } };
+	struct nacmdemo d = { .data = &dd };
+	const struct cbl_ywarning *w;
+	const char *who[] = { "bob", "alice" };
+	struct fixture f;
+	cbl_yarena *a;
+	cbl_msg *m, *r;
+	size_t nw;
+
+	setup(&f);
+	ATF_REQUIRE_EQ(0, kset(1, &dl));
+	for (int i = 0; i < 2; i++) {
+		m = req(&f, CBL_YCMD_EDIT, who[i]);
+		dd.item.n = i == 0 ? 2 : 1;
+		dd.item.v = i == 0 ? two : two + 1;
+		ATF_REQUIRE_EQ(0, cbl_msg_put_ymember(m, n_data, &d));
+		r = NULL;
+		ATF_REQUIRE_EQ_MSG(0, cbl_request(f.c, m, &r, 5000), "%s: %s",
+		    who[i], r != NULL ? cbl_msg_err_str(r) : "");
+		ATF_REQUIRE((a = cbl_yarena_new()) != NULL);
+		nw = 0;
+		ATF_CHECK(cbl_msg_ywarnings(r, a, &w, &nw) == 0 && nw == 1);
+		if (nw == 1 && i == 0)
+			ATF_CHECK_MSG(w[0].sid == 0 &&
+			    strstr(w[0].text, "hidden-ref") == NULL, "%s",
+			    w[0].text);
+		else if (nw == 1)
+			ATF_CHECK_MSG(w[0].sid == child_sid(n_locked,
+			    "hidden-ref") && strstr(w[0].text, "hidden-ref") !=
+			    NULL, "%s", w[0].text);
+		cbl_yarena_free(a);
+		cbl_msg_free(r);
+	}
+	teardown(&f);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -750,5 +1133,10 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, notify);
 	ATF_TP_ADD_TC(tp, conn_user);
 	ATF_TP_ADD_TC(tp, commit);
+	ATF_TP_ADD_TC(tp, action_keys);
+	ATF_TP_ADD_TC(tp, notify_keys);
+	ATF_TP_ADD_TC(tp, bad_path);
+	ATF_TP_ADD_TC(tp, delete_below);
+	ATF_TP_ADD_TC(tp, warning_named);
 	return (atf_no_error());
 }

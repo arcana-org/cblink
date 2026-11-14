@@ -218,6 +218,7 @@ CBLINK_1.0 {
 	cbl_req_user;
 	cbl_ynacm_changed;
 	cbl_ynacm_counters;
+	cbl_ynacm_status;
 	cbl_ydatastores;
 	cbl_msg_set_datastore;
 	cbl_msg_set_accept;

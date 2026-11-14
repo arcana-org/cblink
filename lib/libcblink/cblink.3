@@ -294,7 +294,17 @@ one nacm:default-deny-all marks.
 .Fn cbl_ynacm_changed
 says the program changed the rules itself;
 .Fn cbl_ynacm_counters
-gives the denied operations, writes and notifications.
+gives the denied operations, writes and notifications;
+.Fn cbl_ynacm_status
+whether the rules are in force: rules that cannot be read deny
+everything but the recovery session, and a deny rule whose path does not
+compile denies all of its module to its rule-list's groups
+.Pq Er EACCES ;
+a permit rule whose path does not compile never matches
+.Pq Er EINVAL ,
+and its text says which rule.
+An action's exec is checked against its target's keys; a delete against
+every node it takes away.
 .Pp
 .Fn cbl_ydatastores
 gives family 1 RFC 8342's running and candidate datastores, a client
@@ -303,6 +313,11 @@ naming one with
 ietf-netconf's commit, confirmed commit, cancel-commit and
 discard-changes are answered by the library, an undo a handler fails
 told to the program.
+A commit, or an EDIT of running, holds running as a whole to its whens,
+musts and references; what it already failed, of a node left as it was,
+is a warning, and with
+.Dv CBL_YDS_REFS_WARN
+so is every reference to what is not there.
 A handler refuses what is to be accepted first with
 .Fn cbl_req_set_yapptag ,
 which a request accepts with

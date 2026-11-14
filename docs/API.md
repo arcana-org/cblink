@@ -573,7 +573,27 @@ void	cbl_xval_free(struct cbl_xval *);
   compiled once against the schema, each step to its node and each
   value to its key's type, and matches the node it names and all below
   it. An rpc or a notification with no instance is matched by its
-  schema node, which a path with predicates never matches.
+  schema node, which `cbl_dnacm_path_match_schema()` never matches with
+  a path with predicates. NACM itself matches an action by its
+  target's keys (the instance it is run on, `$USER` too), and a
+  notification below a data node, which is sent without its keys, as
+  a deny but never as a permit: a deny is not skipped for not being
+  evaluated. A path that does not compile, in a deny rule, denies all
+  of the rule's module (its `module-name`, else the path's first
+  step's module where one is served, else every module) to the
+  rule-list's groups for the rule's operations; in a permit rule it
+  never matches; `cbl_ynacm_status()` says which and why, and an EDIT that
+  would write such a path is refused.
+- **Datastores** (`cbl_ydatastores()`, flags `CBL_YDS_CONFIRMED`,
+  `CBL_YDS_REFS_WARN`): a commit or an EDIT of running holds running as
+  a whole to its `when`s, `must`s and references; a failure running
+  already had, of a node the change leaves as it was, is a warning of
+  the answer. With `CBL_YDS_REFS_WARN` every leafref or
+  instance-identifier with require-instance whose target is not there is
+  a warning too, new or old, never a refusal, for a running that is a
+  live system's view. An EDIT of the candidate checks the nodes it
+  names (`when`, `must`, what a `when` makes mandatory) and no
+  references, either way.
 - **Parent references** (RFC 8528 section 4): a mounted tree's
   expressions see only it, and what its mount point's parent-reference
   expressions select of the parent tree, each a node set evaluated from
@@ -622,7 +642,13 @@ void	cbl_xval_free(struct cbl_xval *);
 that relays a peer's data without its structs (a RESTCONF front end),
 names from the peer's `.sid` files, types from the program's own tables
 where they have the node of the same schema-node path, whatever SID
-either side gives it.
+either side gives it. A JSON member's name is one name (no `/`, none
+empty), and a child named twice, as `x` and as `m:x`, is refused; each
+key is the child's delta from the node the map is of. A decimal64
+given as a JSON number is read from its digits, never through a
+double: more fraction digits than its type has are refused. A `.sid`
+item without its namespace, an identifier with a NUL in it, and one
+item by two SIDs are refused.
 
 ```c
 /* a peer's items (RFC 9595), resolved to the local tables' */
@@ -778,7 +804,9 @@ int		 cbl_peer_cred(const cbl_peer *, uid_t *, gid_t *);	/* AF_UNIX via getpeere
 - On direct transports, this means mTLS succeeded.
 - On AF_UNIX, the flag is never set. Applications authorize on
   `cbl_peer_cred()`, or pass `CBL_LF_UNIX_TRUSTED`, which marks every
-  AF_UNIX peer authenticated so that filesystem permissions alone decide.
+  AF_UNIX peer whose credentials `getpeereid(3)` gives authenticated, so
+  that filesystem permissions alone decide; one whose credentials it
+  cannot give is not.
 
 ## 10. Client API
 

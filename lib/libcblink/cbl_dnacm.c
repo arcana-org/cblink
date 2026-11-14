@@ -254,18 +254,16 @@ cbl_dnacm_path_free(cbl_dnacm_path *p)
 	free(p);
 }
 
-/* Whether entry or leaf-list value n passes predicate pr, for user. */
+/* Whether value have, of predicate pr's key, is the one pr wants. */
 static bool
-passes(const struct npred *pr, const cbl_dnode *n, const char *user)
+value_passes(const struct npred *pr, const void *have, const char *user)
 {
-	const cbl_dnode *k = pr->key == n->sn ? n : cbl_dnode_child(n,
-	    pr->key);
 	const void *want = pr->value;
 	cbl_yarena *a = NULL;
 	void *v;
 	bool ok;
 
-	if (k == NULL || k->value == NULL)
+	if (have == NULL)
 		return (false);
 	if (pr->user) {
 		if (user == NULL || (a = cbl_yarena_new()) == NULL ||
@@ -278,9 +276,21 @@ passes(const struct npred *pr, const cbl_dnode *n, const char *user)
 		}
 		want = v;
 	}
-	ok = cbl_dvalue_equal(pr->key->type, k->value, want);
+	ok = cbl_dvalue_equal(pr->key->type, have, want);
 	cbl_yarena_free(a);
 	return (ok);
+}
+
+/* Whether entry or leaf-list value n passes predicate pr, for user. */
+static bool
+passes(const struct npred *pr, const cbl_dnode *n, const char *user)
+{
+	const cbl_dnode *k = pr->key == n->sn ? n : cbl_dnode_child(n,
+	    pr->key);
+
+	if (k == NULL)
+		return (false);
+	return (value_passes(pr, k->value, user));
 }
 
 bool
@@ -339,4 +349,70 @@ cbl_dnacm_path_match_schema(const cbl_dnacm_path *p,
 		    p->steps[i].npreds > 0)
 			return (false);
 	return (true);
+}
+
+/*
+ * p against schema node sn, of which no instance is in a tree: an rpc's,
+ * an action's, a notification's.  at, when not NULL, is the instance it
+ * is of (an action's target, as cbl_yiid_read() reads one: the node and
+ * the keys of the lists from the top down to it, then a leaf-list
+ * entry's value), against which the predicates of its steps and of the
+ * steps above it are held.  A predicate on any other step cannot be:
+ * CBL_D_NACM_UNKNOWN then, unless another step does not match.
+ */
+int
+cbl_d_nacm_path_match_at(const cbl_dnacm_path *p, const struct cbl_ynode *sn,
+    const struct cbl_ynode *at, const void *const *vals, size_t nvals,
+    const char *user)
+{
+	const struct cbl_ynode *chain[CBL_D_DEPTH_MAX + 1];
+	size_t nc = 0, off = 0;
+	bool unknown = false, inst;
+
+	if (p == NULL || sn == NULL)
+		return (CBL_D_NACM_NO);
+	if (p->nsteps == 0)
+		return (CBL_D_NACM_YES);
+	for (const struct cbl_ynode *a = sn; a != NULL; a = a->parent) {
+		if (nc == CBL_D_DEPTH_MAX + 1)
+			return (CBL_D_NACM_NO);
+		chain[nc++] = a;
+	}
+	if (nc < p->nsteps)
+		return (CBL_D_NACM_NO);
+	for (size_t i = 0; i < p->nsteps; i++)
+		if (chain[nc - 1 - i] != p->steps[i].sn)
+			return (CBL_D_NACM_NO);
+	for (size_t i = 0; i < p->nsteps; i++) {
+		const struct cbl_ynode *x = chain[nc - 1 - i];
+		const struct nstep *st = &p->steps[i];
+
+		/* x is at or above at: its keys are in vals, from off. */
+		inst = false;
+		for (const struct cbl_ynode *y = at; y != NULL && !inst;
+		    y = y->parent)
+			inst = y == x;
+		for (size_t j = 0; j < st->npreds; j++) {
+			const struct npred *pr = &st->preds[j];
+			const void *have = NULL;
+
+			if (!inst) {
+				unknown = true;
+				continue;
+			}
+			if (pr->key == x && x == at &&
+			    x->kind == CBL_YN_LEAFLIST && nvals > 0)
+				have = vals[nvals - 1];
+			for (uint16_t k = 0; x->kind == CBL_YN_LIST &&
+			    k < x->nkeys; k++)
+				if (x->child[x->keys[k]] == pr->key &&
+				    off + k < nvals)
+					have = vals[off + k];
+			if (!value_passes(pr, have, user))
+				return (CBL_D_NACM_NO);
+		}
+		if (inst && x->kind == CBL_YN_LIST)
+			off += x->nkeys;
+	}
+	return (unknown ? CBL_D_NACM_UNKNOWN : CBL_D_NACM_YES);
 }

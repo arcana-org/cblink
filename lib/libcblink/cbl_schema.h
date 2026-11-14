@@ -658,7 +658,22 @@ int		 cbl_msg_ynotif(const cbl_msg *msg, struct cbl_ynotif *nt,
  * have them.  The program tells a change of the rules it made itself
  * with cbl_ynacm_changed(); an EDIT through family 1 is told by itself.
  * cbl_ynacm_counters() has the state leaves' counts.  Rules that cannot
- * be read deny everything but the recovery session.
+ * be read deny everything but the recovery session.  A deny rule whose
+ * path does not compile denies, for its rule-list's groups and its
+ * access operations, everything of its module (its module-name, else
+ * the path's first step's module where one is served, else every
+ * module); a permit rule whose path does not compile never matches.
+ * cbl_ynacm_status() says which (the rules read as they are now): 0,
+ * the rules in force (or NACM off); EACCES, rules not read or a deny
+ * widened so; EINVAL, a permit that never matches; why (of whylen bytes)
+ * names the rule-list, the rule and what is wrong with its path.  An
+ * EDIT of the nacm container through family 1 with such a path is
+ * refused (invalid-value).  A path's nodes are of the server that has
+ * ietf-netconf-acm, or of the first other server that has them.  A path
+ * rule with key predicates matches an action by its target's keys, and
+ * a notification below a data node, of which no instance is known, as a
+ * deny and never as a permit.  A delete is checked for every node it
+ * takes away, the node named and each below it.
  */
 /*
  * Datastores (RFC 8342) for family 1, where a program asks for them with
@@ -684,6 +699,17 @@ int		 cbl_msg_ynotif(const cbl_msg *msg, struct cbl_ynotif *nt,
  * warnings (cbl_msg_ywarnings()).
  */
 #define	CBL_YDS_CONFIRMED	0x0001
+/*
+ * A leafref or instance-identifier with require-instance whose target is
+ * not there, found when running is held whole (an EDIT of running, a
+ * commit), is a warning of the answer, never a refusal, new or old: for
+ * a running that is a view of a live system, where what a reference
+ * names may come later (an interface a service makes).  when, must and
+ * what a when makes mandatory are held as without it.  An EDIT of the
+ * candidate checks the nodes it names for when, must and what a when
+ * makes mandatory, and no references, with the flag or without.
+ */
+#define	CBL_YDS_REFS_WARN	0x0002
 
 enum cbl_yds_name {
 	CBL_YDS_RUNNING,
@@ -730,6 +756,7 @@ struct cbl_ynacm_counts {
 
 void		 cbl_ynacm_changed(cbl_ctx *ctx);
 void		 cbl_ynacm_counters(cbl_ctx *ctx, struct cbl_ynacm_counts *c);
+int		 cbl_ynacm_status(cbl_ctx *ctx, char *why, size_t whylen);
 
 int		 cbl_yserver_add(cbl_ctx *ctx, const struct cbl_yserver *srv,
 		    void *arg);

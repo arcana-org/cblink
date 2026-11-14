@@ -31,7 +31,14 @@
  * Refused, with the reason: what is not XSD (back-references and every
  * escape XSD has not), character class subtraction, the categories and
  * blocks no POSIX class matches, a complement inside a class, counts
- * over RE_DUP_MAX, text that is not UTF-8.
+ * over RE_DUP_MAX, counts that make the expression over
+ * CBL_PAT_MAX_EXPANDED once expanded, text that is not UTF-8.
+ *
+ * regcomp(3) makes {n,m} of an atom m copies of it (n + 1 for {n,}), and
+ * nested counts multiply: "((a{255}){255}){255}" is 16 million copies of
+ * "a", gigabytes of program.  The size each piece has once its counts are
+ * expanded is kept as it is translated, and an expression over
+ * CBL_PAT_MAX_EXPANDED is refused there.
  */
 
 #include <errno.h>
@@ -77,7 +84,7 @@ struct pparse {
 	bool		 failed;
 };
 
-static bool	regexp(struct pparse *);
+static bool	regexp(struct pparse *, size_t *);
 
 static bool
 refuse(struct pparse *p, size_t pos, const char *fmt, ...)
@@ -551,13 +558,15 @@ class_escape(struct pparse *p)
  * quantifier: [?*+] | '{' n (',' m?)? '}', counts up to RE_DUP_MAX.  An
  * atom taken no times ({0}, {0,0}), which matches nothing but the empty
  * string and which regcomp(3) refuses, is written as an empty group:
- * mark is where the atom's ERE begins.
+ * mark is where the atom's ERE begins.  *size is the atom's size once
+ * expanded, then the piece's: the atom's times the copies regcomp(3)
+ * makes of it.
  */
 static bool
-quantifier(struct pparse *p, size_t mark)
+quantifier(struct pparse *p, size_t mark, size_t *size)
 {
 	size_t at = p->i;
-	unsigned long n, m;
+	unsigned long n, m, copies;
 	char *end;
 
 	switch (p->s[p->i]) {
@@ -589,19 +598,28 @@ quantifier(struct pparse *p, size_t mark)
 		    "takes no more than", RE_DUP_MAX));
 	if (m < n)
 		return (refuse(p, at, "a count backwards"));
+	/* Both at most CBL_PAT_MAX_EXPANDED and RE_DUP_MAX + 1: no overflow. */
+	copies = m == ULONG_MAX ? n + 1 : m;
+	if (copies > 1 && *size * copies > CBL_PAT_MAX_EXPANDED)
+		return (refuse(p, at, "a count that makes the expression over "
+		    "%d bytes once regcomp(3) expands its counts",
+		    CBL_PAT_MAX_EXPANDED));
 	p->i = (size_t)(end - p->s) + 1;
 	if (m == 0) {
 		p->out.len = mark;
+		*size = 2;
 		return (puts_(p, "()"));
 	}
+	if (copies > 1)
+		*size *= copies;
 	return (put(p, p->s + at, p->i - at));
 }
 
-/* atom quantifier? */
+/* atom quantifier?, its size once expanded added to *size. */
 static bool
-piece(struct pparse *p)
+piece(struct pparse *p, size_t *size)
 {
-	size_t at = p->i, mark = p->out.len;
+	size_t at = p->i, mark = p->out.len, inner = 0, psize;
 	uint32_t ch;
 	char c = p->s[p->i];
 
@@ -611,7 +629,7 @@ piece(struct pparse *p)
 			return (refuse(p, at, "groups nested deeper than %d",
 			    CBL_PAT_MAX_DEPTH));
 		p->i++;
-		if (!puts_(p, "(") || !regexp(p))
+		if (!puts_(p, "(") || !regexp(p, &inner))
 			return (false);
 		if (p->s[p->i] != ')')
 			return (refuse(p, at, "a group without its \")\""));
@@ -647,15 +665,24 @@ piece(struct pparse *p)
 			return (false);
 		break;
 	}
-	return (quantifier(p, mark));
+	/* A group's own ERE holds its pieces unexpanded: theirs instead. */
+	psize = c == '(' ? inner + 2 : p->out.len - mark;
+	if (!quantifier(p, mark, &psize))
+		return (false);
+	*size += psize;
+	if (*size > CBL_PAT_MAX_EXPANDED)
+		return (refuse(p, at, "over %d bytes once regcomp(3) expands "
+		    "its counts", CBL_PAT_MAX_EXPANDED));
+	return (true);
 }
 
 /*
  * regExp: branch ('|' branch)*.  An empty branch, which XSD allows and
- * an ERE does not, is written as an empty group.
+ * an ERE does not, is written as an empty group.  *size: the size of
+ * it all once expanded.
  */
 static bool
-regexp(struct pparse *p)
+regexp(struct pparse *p, size_t *size)
 {
 	size_t mark;
 
@@ -663,29 +690,35 @@ regexp(struct pparse *p)
 		mark = p->out.len;
 		while (p->s[p->i] != '\0' && p->s[p->i] != '|' &&
 		    p->s[p->i] != ')')
-			if (!piece(p))
+			if (!piece(p, size))
 				return (false);
-		if (p->out.len == mark && !puts_(p, "()"))
-			return (false);
+		if (p->out.len == mark) {
+			if (!puts_(p, "()"))
+				return (false);
+			*size += 2;
+		}
 		if (p->s[p->i] != '|')
 			return (true);
 		p->i++;
 		if (!puts_(p, "|"))
 			return (false);
+		(*size)++;
 	}
 }
 
-char *
-cbl_pattern_ere(const char *xsd, char *why, size_t whylen, size_t *pos)
+static char *
+pattern_ere(const char *xsd, char *why, size_t whylen, size_t *pos,
+    size_t *sizep)
 {
 	struct pparse p = { .s = xsd, .why = why, .whylen = whylen };
+	size_t size = 0;
 
 	if (why != NULL && whylen > 0)
 		why[0] = '\0';
 	if (xsd == NULL || strnlen(xsd, CBL_PAT_MAX_LEN + 1) >
 	    CBL_PAT_MAX_LEN)
 		refuse(&p, 0, "longer than %d bytes", CBL_PAT_MAX_LEN);
-	else if (puts_(&p, "^(") && regexp(&p)) {
+	else if (puts_(&p, "^(") && regexp(&p, &size)) {
 		if (xsd[p.i] == ')')
 			refuse(&p, p.i, "a \")\" that closes no group");
 		else
@@ -697,7 +730,16 @@ cbl_pattern_ere(const char *xsd, char *why, size_t whylen, size_t *pos)
 			*pos = p.pos;
 		return (NULL);
 	}
+	if (sizep != NULL)
+		*sizep = size + 4;
 	return (p.out.p);
+}
+
+char *
+cbl_pattern_ere(const char *xsd, char *why, size_t whylen, size_t *pos)
+{
+
+	return (pattern_ere(xsd, why, whylen, pos, NULL));
 }
 
 /*
@@ -733,11 +775,19 @@ int
 cbl_pattern_compile(const char *xsd, regex_t *re, char *why, size_t whylen,
     size_t *pos)
 {
+
+	return (cbl_pattern_compile_size(xsd, re, NULL, why, whylen, pos));
+}
+
+int
+cbl_pattern_compile_size(const char *xsd, regex_t *re, size_t *size,
+    char *why, size_t whylen, size_t *pos)
+{
 	locale_t loc, old;
 	char *ere;
 	int rc;
 
-	if ((ere = cbl_pattern_ere(xsd, why, whylen, pos)) == NULL)
+	if ((ere = pattern_ere(xsd, why, whylen, pos, size)) == NULL)
 		return (-1);
 	if ((loc = utf8_locale()) == NULL) {
 		free(ere);

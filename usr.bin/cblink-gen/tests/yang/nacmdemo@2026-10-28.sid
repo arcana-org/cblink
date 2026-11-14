@@ -44,6 +44,16 @@
       },
       {
         "namespace": "data",
+        "identifier": "/nacmdemo:data/item/changed",
+        "sid": "82025"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/nacmdemo:data/item/changed/what",
+        "sid": "82026"
+      },
+      {
+        "namespace": "data",
         "identifier": "/nacmdemo:data/item/name",
         "sid": "82005"
       },
@@ -54,6 +64,26 @@
       },
       {
         "namespace": "data",
+        "identifier": "/nacmdemo:data/item/reset",
+        "sid": "82027"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/nacmdemo:data/item/reset/input",
+        "sid": "82028"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/nacmdemo:data/item/reset/output",
+        "sid": "82029"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/nacmdemo:data/item/reset/output/ok",
+        "sid": "82030"
+      },
+      {
+        "namespace": "data",
         "identifier": "/nacmdemo:data/public",
         "sid": "82007"
       },
@@ -61,6 +91,21 @@
         "namespace": "data",
         "identifier": "/nacmdemo:data/secret",
         "sid": "82008"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/nacmdemo:data/sys",
+        "sid": "82031"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/nacmdemo:data/sys/users",
+        "sid": "82032"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/nacmdemo:data/sys/users/n",
+        "sid": "82033"
       },
       {
         "namespace": "data",
@@ -96,6 +141,11 @@
         "namespace": "data",
         "identifier": "/nacmdemo:locked",
         "sid": "82015"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/nacmdemo:locked/hidden-ref",
+        "sid": "82034"
       },
       {
         "namespace": "data",

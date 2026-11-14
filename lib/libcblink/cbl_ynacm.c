@@ -21,6 +21,17 @@
  * marks (or one above it) is denied, and for a write one
  * nacm:default-deny-write marks, else the default of the access (read,
  * write or exec).  enable-nacm false lets everything through.
+ *
+ * Rules that cannot be read deny everything but the recovery session
+ * (the rules are broken).  A deny rule whose path does not compile still
+ * denies, wider: for its rule-list's groups and its access operations,
+ * everything of the module it names (its module-name, else its path's
+ * first step's module where that is one served; else every module).  A
+ * permit rule whose path does not compile never matches.  Why is kept
+ * for cbl_ynacm_status() either way.  A path rule with key
+ * predicates on a node of which no instance is known (a notification's
+ * parents, an rpc's) matches where it denies and does not where it
+ * permits: a deny is never skipped for not being evaluated.
  */
 
 #include <sys/param.h>
@@ -61,7 +72,9 @@ struct nrule {
 	char		*module;	/* "*": any */
 	enum rtype	 type;
 	char		*name;		/* rpc's or notification's, "*": any */
-	cbl_dnacm_path	*path;		/* RT_PATH; NULL: it never matches */
+	cbl_dnacm_path	*path;		/* RT_PATH; NULL: it never matches
+					 * (a permit's; a deny's breaks the
+					 * rules) */
 	unsigned	 ops;
 	bool		 permit;
 };
@@ -84,6 +97,9 @@ struct cbl_ynacm {
 	bool		 enable;
 	bool		 rd, wr, ex;	/* the defaults: true, permit */
 	bool		 broken;	/* not read: all denied */
+	bool		 inert;		/* a permit rule never matches */
+	bool		 widened;	/* a deny rule denies its module */
+	char		 why[256];	/* why, of either */
 	struct ngroup	*groups;
 	size_t		 ngroups;
 	struct nlist	*lists;
@@ -103,6 +119,9 @@ struct target {
 	const char		*name;	/* an rpc's or a notification's */
 	const cbl_dnode		*dn;	/* an instance, or NULL */
 	const struct cbl_ynode	*sn;	/* its schema node, or NULL */
+	const struct cbl_ynode	*at;	/* an action's: its target, its */
+	const void *const	*vals;	/* keys (cbl_yiid_read()); or NULL */
+	size_t			 nvals;
 	unsigned		 deny;	/* CBL_YNF_DENY_* on it or above */
 };
 
@@ -263,13 +282,55 @@ count(const cbl_dnode *n, const char *name)
 	return (k);
 }
 
-/* A rule from its entry; its path compiled for schema s.  A path that
- * does not compile (a module not served) never matches. */
+/* The schemas a path may be compiled for: the nacm server's first, then
+ * the context's other servers'. */
+struct schemas {
+	const struct cbl_yschema	**v;
+	size_t				 n;
+};
+
+/*
+ * The module the first step of path names, where one of ss serves it:
+ * *mod replaced with it (malloc'd); else left as it is ("*").
+ */
 static int
-rule_of(const struct cbl_yschema *s, const cbl_dnode *e, struct nrule *r)
+path_module(const struct schemas *ss, const char *path, char **mod)
+{
+	size_t len;
+	char *m;
+
+	path += strspn(path, " \t");
+	if (*path != '/')
+		return (0);
+	path++;
+	len = strcspn(path, ":/[ \t");
+	if (path[len] != ':' || len == 0)
+		return (0);
+	for (size_t i = 0; i < ss->n; i++)
+		for (uint32_t j = 0; j < ss->v[i]->nmod; j++)
+			if (strlen(ss->v[i]->mod[j]->name) == len &&
+			    strncmp(ss->v[i]->mod[j]->name, path, len) == 0) {
+				if ((m = strndup(path, len)) == NULL)
+					return (ENOMEM);
+				free(*mod);
+				*mod = m;
+				return (0);
+			}
+	return (0);
+}
+
+/*
+ * A rule from its entry of rule-list l; its path compiled for the first
+ * of ss that has its nodes.  One that compiles for none: c broken by a
+ * deny, c's why telling which; a permit never matches.
+ */
+static int
+rule_of(const struct cbl_yschema *s, const struct schemas *ss,
+    const cbl_dnode *l, const cbl_dnode *e, struct nrule *r,
+    struct cbl_ynacm *c)
 {
 	const cbl_dnode *x;
-	char *t, why[128];
+	char *t, *ln, *rn, why[128];
 
 	r->module = text(s, kid(e, "module-name"), "*");
 	r->permit = says(s, kid(e, "action"), "permit", false);
@@ -286,7 +347,41 @@ rule_of(const struct cbl_yschema *s, const cbl_dnode *e, struct nrule *r)
 		r->type = RT_PATH;
 		if ((t = text(s, x, NULL)) == NULL)
 			return (ENOMEM);
-		r->path = cbl_dnacm_path_new(s, t, why, sizeof(why));
+		why[0] = '\0';
+		for (size_t i = 0; r->path == NULL && i < ss->n; i++) {
+			char w[128];
+
+			r->path = cbl_dnacm_path_new(ss->v[i], t, w, sizeof(w));
+			if (r->path == NULL && errno == ENOMEM) {
+				free(t);
+				return (ENOMEM);
+			}
+			if (i == 0)
+				(void)strlcpy(why, w, sizeof(why));
+		}
+		if (r->path == NULL && (!r->permit || c->why[0] == '\0')) {
+			ln = text(s, kid(l, "name"), "");
+			rn = text(s, kid(e, "name"), "");
+			(void)snprintf(c->why, sizeof(c->why), "rule-list "
+			    "\"%s\", rule \"%s\": the path %s: %s%s",
+			    ln != NULL ? ln : "", rn != NULL ? rn : "", t, why,
+			    r->permit ? " (the permit never matches)" :
+			    " (the deny denies its module for its groups)");
+			free(ln);
+			free(rn);
+		}
+		if (r->path == NULL && r->permit)
+			c->inert = true;
+		else if (r->path == NULL) {
+			/* All of its module, as far as it says one. */
+			c->widened = true;
+			r->type = RT_ANY;
+			if (r->module != NULL && strcmp(r->module, "*") == 0 &&
+			    path_module(ss, t, &r->module) != 0) {
+				free(t);
+				return (ENOMEM);
+			}
+		}
 		free(t);
 	} else
 		r->type = RT_ANY;
@@ -298,8 +393,8 @@ rule_of(const struct cbl_yschema *s, const cbl_dnode *e, struct nrule *r)
 
 /* The rules from the nacm container's tree. */
 static int
-parse(const struct cbl_yschema *s, const cbl_dnode *nacm,
-    struct cbl_ynacm *c)
+parse(const struct cbl_yschema *s, const struct schemas *ss,
+    const cbl_dnode *nacm, struct cbl_ynacm *c)
 {
 	const cbl_dnode *gs, *e, *r;
 	size_t i, j;
@@ -343,7 +438,8 @@ parse(const struct cbl_yschema *s, const cbl_dnode *nacm,
 		j = 0;
 		for (r = cbl_dnode_first(e); r != NULL; r = cbl_dnode_next(r))
 			if (strcmp(cbl_dnode_schema(r)->name, "rule") == 0 &&
-			    (error = rule_of(s, r, &l->rules[j++])) != 0)
+			    (error = rule_of(s, ss, e, r, &l->rules[j++], c)) !=
+			    0)
 				return (error);
 	}
 	return (0);
@@ -376,43 +472,91 @@ nacm_node(cbl_ctx *ctx, struct cbl_yfound *f)
 	return (found);
 }
 
-/* The rules read anew, on a request of conn's (NULL: none). */
-static struct cbl_ynacm *
-nacm_read(cbl_conn *conn, const struct cbl_yfound *f)
+/* ss: the schemas of ctx's servers, s's first; v malloc'd. */
+static int
+schemas_of(cbl_ctx *ctx, const struct cbl_yschema *s, struct schemas *ss)
 {
-	struct cbl_ybuf b = { NULL, 0, 0 };
-	struct cbl_ynacm *c;
-	struct cbl_req r;
-	cbl_dtree *t = NULL;
-	cbl_yarena *a;
-	void *data;
-	char why[128];
-	int error = ENOMEM;
 
+	ss->n = 0;
+	pthread_rwlock_rdlock(&ctx->famlock);
+	if ((ss->v = calloc(ctx->nysrv + 1, sizeof(*ss->v))) == NULL) {
+		pthread_rwlock_unlock(&ctx->famlock);
+		return (ENOMEM);
+	}
+	ss->v[ss->n++] = s;
+	for (size_t i = 0; i < ctx->nysrv; i++)
+		if (ctx->ysrv[i].srv->schema != s)
+			ss->v[ss->n++] = ctx->ysrv[i].srv->schema;
+	pthread_rwlock_unlock(&ctx->famlock);
+	return (0);
+}
+
+/* The rules of tree nacm, a nacm container of schema s; NULL: no memory. */
+static struct cbl_ynacm *
+nacm_of(cbl_ctx *ctx, const struct cbl_yschema *s, const cbl_dnode *nacm,
+    int *errorp)
+{
+	struct cbl_ynacm *c;
+	struct schemas ss;
+
+	*errorp = ENOMEM;
 	if ((c = calloc(1, sizeof(*c))) == NULL)
 		return (NULL);
 	atomic_init(&c->refs, 1);
 	c->enable = true;
 	c->rd = c->ex = true;
+	ss.v = NULL;
+	if (nacm != NULL && (*errorp = schemas_of(ctx, s, &ss)) == 0)
+		*errorp = parse(s, &ss, nacm, c);
+	else if (nacm == NULL)
+		*errorp = 0;		/* none: the defaults */
+	free(ss.v);
+	if (*errorp != 0) {
+		nacm_free(c);
+		return (NULL);
+	}
+	return (c);
+}
+
+/* The rules read anew, on a request of conn's (NULL: none). */
+static struct cbl_ynacm *
+nacm_read(cbl_ctx *ctx, cbl_conn *conn, const struct cbl_yfound *f)
+{
+	struct cbl_ybuf b = { NULL, 0, 0 };
+	struct cbl_ynacm *c = NULL;
+	struct cbl_req r;
+	cbl_dtree *t = NULL;
+	cbl_yarena *a;
+	void *data;
+	char why[128], said[160];
+	int error = ENOMEM;
+
+	why[0] = said[0] = '\0';
 	memset(&r, 0, sizeof(r));
 	r.conn = conn;
 	r.recovery = true;
 	atomic_init(&r.refs, 1);
 	r.yarg = f->arg;
-	if ((a = cbl_yarena_new()) != NULL &&
-	    (data = cbl_yarena_alloc(a, f->n->module->size)) != NULL &&
-	    (error = f->h->get(&r, data, a)) == 0) {
-		if (!cbl_ymember_present(f->n, data))
-			error = 0;	/* none: the defaults */
-		else if ((t = cbl_dtree_new(f->srv->schema)) == NULL)
-			error = ENOMEM;
-		else if ((error = cbl_yencode_member(f->n, data, &b)) == 0 &&
-		    (error = cbl_dnode_decode(cbl_dtree_root(t), f->n, b.p,
-		    b.len, 0, why, sizeof(why), NULL)) == 0 &&
-		    kid(cbl_dtree_root(t), "nacm") != NULL)
-			error = parse(f->srv->schema, kid(cbl_dtree_root(t),
-			    "nacm"), c);
-	}
+	if ((a = cbl_yarena_new()) == NULL ||
+	    (data = cbl_yarena_alloc(a, f->n->module->size)) == NULL)
+		error = ENOMEM;
+	else if ((error = f->h->get(&r, data, a)) != 0)
+		(void)snprintf(said, sizeof(said), "the get handler failed: "
+		    "%s", r.err_msg != NULL ? r.err_msg : strerror(error));
+	else if (!cbl_ymember_present(f->n, data))
+		;			/* none: the defaults */
+	else if ((t = cbl_dtree_new(f->srv->schema)) == NULL)
+		error = ENOMEM;
+	else if ((error = cbl_yencode_member(f->n, data, &b)) == 0 &&
+	    (error = cbl_dnode_decode(cbl_dtree_root(t), f->n, b.p, b.len, 0,
+	    why, sizeof(why), NULL)) == 0)
+		c = nacm_of(ctx, f->srv->schema, kid(cbl_dtree_root(t), "nacm"),
+		    &error);
+	if (error == 0 && c == NULL)
+		c = nacm_of(ctx, f->srv->schema, NULL, &error);
+	if (error != 0 && said[0] == '\0')
+		(void)snprintf(said, sizeof(said), "%s", why[0] != '\0' ? why :
+		    strerror(error));
 	cbl_ybuf_free(&b);
 	cbl_dtree_free(t);
 	cbl_yarena_free(a);
@@ -425,6 +569,8 @@ nacm_read(cbl_conn *conn, const struct cbl_yfound *f)
 		atomic_init(&c->refs, 1);
 		c->enable = true;
 		c->broken = true;
+		(void)snprintf(c->why, sizeof(c->why), "the nacm container "
+		    "could not be read: %s", said);
 	}
 	return (c);
 }
@@ -449,7 +595,7 @@ nacm_get(cbl_ctx *ctx, cbl_conn *conn)
 	gen = ctx->nacmgen;
 	pthread_mutex_unlock(&ctx->nacmlock);
 	/* Read without the lock: the handler may take its time. */
-	if ((c = nacm_read(conn, &f)) == NULL)
+	if ((c = nacm_read(ctx, conn, &f)) == NULL)
 		return (NULL);
 	pthread_mutex_lock(&ctx->nacmlock);
 	if (ctx->nacmgen == gen) {
@@ -486,6 +632,62 @@ cbl_ynacm_counters(cbl_ctx *ctx, struct cbl_ynacm_counts *c)
 	c->denied_operations = atomic_load(&ctx->nacm_denied_ops);
 	c->denied_data_writes = atomic_load(&ctx->nacm_denied_writes);
 	c->denied_notifications = atomic_load(&ctx->nacm_denied_notifs);
+}
+
+int
+cbl_ynacm_status(cbl_ctx *ctx, char *why, size_t whylen)
+{
+	struct cbl_ynacm *c;
+	int error;
+
+	if (why != NULL && whylen > 0)
+		why[0] = '\0';
+	if (ctx == NULL)
+		return (EINVAL);
+	if ((c = nacm_get(ctx, NULL)) == NULL)
+		return (0);
+	error = c->broken || c->widened ? EACCES : c->inert ? EINVAL : 0;
+	if (error != 0 && why != NULL && whylen > 0)
+		(void)strlcpy(why, c->why, whylen);
+	nacm_rele(c);
+	return (error);
+}
+
+/*
+ * An EDIT of n, ietf-netconf-acm's nacm, to after: its rules compiled as
+ * they would be read, an uncompilable path refused (invalid-value, said
+ * for req) rather than written to break the rules or to be inert.
+ */
+int
+cbl_ynacm_check_rules(cbl_req *req, const struct cbl_ynode *n,
+    const void *after)
+{
+	const struct cbl_yschema *s = n->module->schema;
+	struct cbl_ybuf b = { NULL, 0, 0 };
+	struct cbl_ynacm *c = NULL;
+	cbl_dtree *t;
+	char why[128], text[300];
+	int error;
+
+	if (after == NULL || strcmp(n->module->name, "ietf-netconf-acm") != 0 ||
+	    strcmp(n->name, "nacm") != 0 || !cbl_ymember_present(n, after))
+		return (0);
+	if ((t = cbl_dtree_new(s)) == NULL)
+		return (ENOMEM);
+	if ((error = cbl_yencode_member(n, after, &b)) == 0 &&
+	    (error = cbl_dnode_decode(cbl_dtree_root(t), n, b.p, b.len, 0, why,
+	    sizeof(why), NULL)) == 0 && kid(cbl_dtree_root(t), "nacm") != NULL)
+		c = nacm_of(req->conn->ctx, s, kid(cbl_dtree_root(t), "nacm"),
+		    &error);
+	cbl_ybuf_free(&b);
+	cbl_dtree_free(t);
+	if (error == 0 && c != NULL && (c->broken || c->widened ||
+	    c->inert)) {
+		(void)snprintf(text, sizeof(text), "%s", c->why);
+		error = cbl_ysay(req, EINVAL, n->sid, "invalid-value", text);
+	}
+	nacm_rele(c);
+	return (error);
 }
 
 void
@@ -553,8 +755,20 @@ rule_matches(const struct nrule *r, const struct target *t, unsigned op,
 			return (false);
 		if (t->dn != NULL)
 			return (cbl_dnacm_path_match(r->path, t->dn, user));
-		return (t->sn != NULL && cbl_dnacm_path_match_schema(r->path,
-		    t->sn));
+		if (t->sn == NULL)
+			return (false);
+		/* No instance in a tree: an action's target, or none.  A
+		 * predicate not known to hold or not holds a deny, not a
+		 * permit. */
+		switch (cbl_d_nacm_path_match_at(r->path, t->sn, t->at, t->vals,
+		    t->nvals, user)) {
+		case CBL_D_NACM_YES:
+			return (true);
+		case CBL_D_NACM_UNKNOWN:
+			return (!r->permit);
+		default:
+			return (false);
+		}
 	}
 	return (false);
 }
@@ -800,12 +1014,13 @@ cbl_ynacm_op(cbl_req *req, const char *module, const char *name, bool deny)
 }
 
 int
-cbl_ynacm_exec(cbl_req *req, const struct cbl_ynode *n)
+cbl_ynacm_exec(cbl_req *req, const struct cbl_ynode *n,
+    const struct cbl_ynode *at, const void *const *vals, size_t nvals)
 {
 	struct cbl_ywho who = { req->user, req->recovery };
 	struct target t = { .kind = n->kind == CBL_YN_RPC ? T_RPC : T_DATA,
-	    .module = n->module->name, .name = n->name, .sn = n,
-	    .deny = deny_of(n) };
+	    .module = n->module->name, .name = n->name, .sn = n, .at = at,
+	    .vals = vals, .nvals = nvals, .deny = deny_of(n) };
 
 	if (check(req->conn->ctx, req->conn, &who, &t, A_EXEC))
 		return (0);
@@ -956,14 +1171,41 @@ tree_of(const struct cbl_yschema *s, const struct cbl_ynode *n,
 	return (t);
 }
 
+/* The first node under n, a node taken away whole, the user may not
+ * delete: each goes with it. */
+static const cbl_dnode *
+delete_denied(const struct cbl_ynacm *c, const struct who_groups *g,
+    const char *user, const cbl_dnode *n, int depth)
+{
+	struct target t = { .kind = T_DATA };
+	const cbl_dnode *bad;
+
+	if (depth > CBL_D_DEPTH_MAX)
+		return (n);
+	for (const cbl_dnode *k = cbl_dnode_first(n); k != NULL;
+	    k = cbl_dnode_next(k)) {
+		t.sn = cbl_dnode_schema(k);
+		t.dn = k;
+		t.module = t.sn->module->name;
+		t.name = t.sn->name;
+		t.deny = deny_of(t.sn);
+		if (!allowed(c, g, user, &t, A_DELETE))
+			return (k);
+		if ((bad = delete_denied(c, g, user, k, depth + 1)) != NULL)
+			return (bad);
+	}
+	return (NULL);
+}
+
 /*
- * The first node of edit d (a diff, cbl_dtree_diff()) the user may not
- * change, or NULL: what is made, each node made with it; what is taken
- * away; a leaf whose value changes.
+ * The first node of edit d (a diff, cbl_dtree_diff(), of before tree bt)
+ * the user may not change, or NULL: what is made, each node made with
+ * it; what is taken away, each node bt has below it too; a leaf whose
+ * value changes.
  */
 static const cbl_dnode *
 write_denied(const struct cbl_ynacm *c, const struct who_groups *g,
-    const char *user, const cbl_dnode *n, int op)
+    const char *user, const cbl_dtree *bt, const cbl_dnode *n, int op)
 {
 	const struct cbl_ynode *sn;
 	const cbl_dnode *bad;
@@ -995,14 +1237,59 @@ write_denied(const struct cbl_ynacm *c, const struct who_groups *g,
 			if (!allowed(c, g, user, &t, access))
 				return (k);
 		}
-		/* What is taken away goes with all below it; what is made
-		 * is each node made. */
-		if (o == CBL_DOP_DELETE || o == CBL_DOP_REMOVE)
+		/*
+		 * What is made is each node made; what is taken away, each
+		 * node taken with it, as the before tree has them (the
+		 * diff's remove has none below it).  RFC 8341 section
+		 * 3.2.5: "If the protocol operation would result in the
+		 * deletion of a datastore node and the user does not have
+		 * "delete" access permission for that node, the protocol
+		 * operation is rejected".
+		 */
+		if (o == CBL_DOP_DELETE || o == CBL_DOP_REMOVE) {
+			const cbl_dnode *was = cbl_d_counterpart(bt, k);
+
+			if (was != NULL && (bad = delete_denied(c, g, user, was,
+			    0)) != NULL)
+				return (bad);
 			continue;
-		if ((bad = write_denied(c, g, user, k, o)) != NULL)
+		}
+		if ((bad = write_denied(c, g, user, bt, k, o)) != NULL)
 			return (bad);
 	}
 	return (NULL);
+}
+
+bool
+cbl_ynacm_may_read(cbl_req *req, const cbl_dnode *n)
+{
+	struct cbl_ywho who = { req->user, req->recovery };
+	struct target t = { .kind = T_DATA };
+	struct cbl_ynacm *c;
+	struct who_groups g;
+	bool ok = true;
+
+	if (n == NULL || who.recovery ||
+	    (c = nacm_get(req->conn->ctx, req->conn)) == NULL)
+		return (true);
+	if (groups_of(c, who.user, &g) != 0) {
+		nacm_rele(c);
+		return (false);
+	}
+	/* It and each node above it: a read leaves out what is below a
+	 * node it may not read. */
+	for (const cbl_dnode *x = n; ok && x != NULL &&
+	    cbl_dnode_schema(x) != NULL; x = cbl_dnode_parent(x)) {
+		t.sn = cbl_dnode_schema(x);
+		t.dn = x;
+		t.module = t.sn->module->name;
+		t.name = t.sn->name;
+		t.deny = deny_of(t.sn);
+		ok = allowed(c, &g, who.user, &t, A_READ);
+	}
+	free(g.v);
+	nacm_rele(c);
+	return (ok);
 }
 
 int
@@ -1033,7 +1320,7 @@ cbl_ynacm_write(cbl_req *req, const struct cbl_ynode *n, const void *before,
 	    (at = tree_of(s, n, after)) == NULL ||
 	    (d = cbl_dtree_diff(bt, at)) == NULL)
 		error = errno != 0 ? errno : ENOMEM;
-	else if ((bad = write_denied(c, &g, who.user, cbl_dtree_root(d),
+	else if ((bad = write_denied(c, &g, who.user, bt, cbl_dtree_root(d),
 	    CBL_DOP_MERGE)) != NULL)
 		error = EACCES;
 	free(g.v);

@@ -30,7 +30,23 @@ struct refs {
 	const cbl_dtree		*t;
 	struct cbl_dederr	*err;
 	cbl_yarena		*a;
+	cbl_d_tolerate_f	*tol;	/* a failure let pass, or NULL */
+	void			*arg;
+	bool			 shallow; /* the node alone */
 };
+
+/* Failure error, said in r->err: let pass where r->tol says so. */
+static int
+keep(struct refs *r, int error)
+{
+
+	if (error != 0 && r->tol != NULL && r->err != NULL &&
+	    r->tol(r->arg, r->err)) {
+		memset(r->err, 0, sizeof(*r->err));
+		return (0);
+	}
+	return (error);
+}
 
 static int
 missing(struct refs *r, const cbl_dnode *at, const char *fmt, ...)
@@ -131,9 +147,11 @@ cbl_d_iid_node(const cbl_dtree *t, const struct cbl_bytes *v, cbl_yarena *a)
 	return (named(t, target, vals));
 }
 
+/* Node c's own reference, if it has one that must be there. */
 static int
-check(struct refs *r, const cbl_dnode *n, int depth)
+check_one(struct refs *r, const cbl_dnode *c)
 {
+	const struct cbl_ytype *t = c->sn->type;
 	const struct cbl_ynode *target;
 	const void **vals;
 	size_t nvals;
@@ -141,51 +159,54 @@ check(struct refs *r, const cbl_dnode *n, int depth)
 	bool found;
 	int error;
 
+	if (t == NULL || (t->flags & CBL_YTF_REQUIRE) == 0)
+		return (0);
+	/* With predicates, the path's nodes; else any of its target. */
+	if ((t->flags & CBL_YTF_LEAFREF) != 0 && (target = c->sn->lref) !=
+	    NULL && t->path >= 0 && strchr(r->t->schema->xpath[t->path],
+	    '[') != NULL) {
+		if ((error = path_has(r->t, c, &found, why,
+		    sizeof(why))) != 0) {
+			if (r->err != NULL) {
+				r->err->node = c;
+				r->err->tag = "operation-failed";
+				r->err->apptag = NULL;
+				snprintf(r->err->msg, sizeof(r->err->msg),
+				    "%s: %s", c->sn->name, why);
+			}
+			return (error);
+		}
+		if (!found)
+			return (missing(r, c, "%s: no %s of its value its "
+			    "path finds", c->sn->name, target->name));
+	} else if ((t->flags & CBL_YTF_LEAFREF) != 0 &&
+	    (target = c->sn->lref) != NULL &&
+	    !has_value(&r->t->root, target, c->value, 0) &&
+	    (r->t->refs == NULL || !has_value(&r->t->refs->root, target,
+	    c->value, 0)))
+		return (missing(r, c, "%s: no %s of its value", c->sn->name,
+		    target->name));
+	if (t->kind == CBL_YT_INSTANCEID) {
+		error = cbl_yiid_read(r->t->schema, c->value, &target, &vals,
+		    &nvals, r->a);
+		if (error != 0 || named(r->t, target, vals) == NULL)
+			return (missing(r, c, "%s: %s", c->sn->name,
+			    error != 0 ? "not an instance-identifier of the "
+			    "schema" : "no node it names"));
+	}
+	return (0);
+}
+
+static int
+check(struct refs *r, const cbl_dnode *n, int depth)
+{
+	int error;
+
 	if (depth > CBL_D_DEPTH_MAX)
 		return (ELOOP);
 	for (const cbl_dnode *c = n->first; c != NULL; c = c->next) {
-		const struct cbl_ytype *t = c->sn->type;
-
-		if (t != NULL && (t->flags & CBL_YTF_REQUIRE) != 0) {
-			/* With predicates, the path's nodes; else any of
-			 * its target. */
-			if ((t->flags & CBL_YTF_LEAFREF) != 0 &&
-			    (target = c->sn->lref) != NULL && t->path >= 0 &&
-			    strchr(r->t->schema->xpath[t->path], '[') !=
-			    NULL) {
-				if ((error = path_has(r->t, c, &found, why,
-				    sizeof(why))) != 0) {
-					if (r->err != NULL) {
-						r->err->node = c;
-						r->err->tag = "operation-failed";
-						snprintf(r->err->msg,
-						    sizeof(r->err->msg), "%s: %s",
-						    c->sn->name, why);
-					}
-					return (error);
-				}
-				if (!found)
-					return (missing(r, c, "%s: no %s of its "
-					    "value its path finds",
-					    c->sn->name, target->name));
-			} else if ((t->flags & CBL_YTF_LEAFREF) != 0 &&
-			    (target = c->sn->lref) != NULL &&
-			    !has_value(&r->t->root, target, c->value, 0) &&
-			    (r->t->refs == NULL || !has_value(&r->t->refs->root,
-			    target, c->value, 0)))
-				return (missing(r, c, "%s: no %s of its value",
-				    c->sn->name, target->name));
-			if (t->kind == CBL_YT_INSTANCEID) {
-				error = cbl_yiid_read(r->t->schema, c->value,
-				    &target, &vals, &nvals, r->a);
-				if (error != 0 || named(r->t, target, vals) ==
-				    NULL)
-					return (missing(r, c, "%s: %s",
-					    c->sn->name, error != 0 ?
-					    "not an instance-identifier of the "
-					    "schema" : "no node it names"));
-			}
-		}
+		if ((error = keep(r, check_one(r, c))) != 0)
+			return (error);
 		if (c->first != NULL && (error = check(r, c, depth + 1)) != 0)
 			return (error);
 	}
@@ -207,4 +228,75 @@ cbl_dtree_check_refs(const cbl_dtree *t, struct cbl_dederr *err)
 	error = check(&r, &t->root, 0);
 	cbl_yarena_free(r.a);
 	return (error);
+}
+
+int
+cbl_d_check_refs(const cbl_dtree *t, const cbl_dnode *n, bool shallow,
+    struct cbl_dederr *err, cbl_d_tolerate_f *tol, void *arg)
+{
+	struct refs r = { .t = t, .err = err, .tol = tol, .arg = arg,
+	    .shallow = shallow };
+	int error;
+
+	if (err != NULL)
+		memset(err, 0, sizeof(*err));
+	if (t == NULL)
+		return (EINVAL);
+	if ((r.a = cbl_yarena_new()) == NULL)
+		return (ENOMEM);
+	if (n == NULL)
+		error = check(&r, &t->root, 0);
+	else if ((error = keep(&r, check_one(&r, n))) == 0 && !shallow &&
+	    n->first != NULL)
+		error = check(&r, n, 1);
+	cbl_yarena_free(r.a);
+	return (error);
+}
+
+/* Whether a and b, nodes of one schema node, are the same instance:
+ * an entry's keys, a leaf-list entry's value; else one. */
+static bool
+same_instance(const cbl_dnode *a, const cbl_dnode *b)
+{
+	const struct cbl_ynode *sn = a->sn;
+
+	if (sn->kind == CBL_YN_LEAFLIST)
+		return (a->value != NULL && b->value != NULL &&
+		    cbl_dvalue_equal(sn->type, a->value, b->value));
+	for (uint16_t i = 0; sn->kind == CBL_YN_LIST && i < sn->nkeys; i++) {
+		const struct cbl_ynode *ks = sn->child[sn->keys[i]];
+		const cbl_dnode *x = cbl_dnode_child(a, ks),
+		    *y = cbl_dnode_child(b, ks);
+
+		if (x == NULL || y == NULL || x->value == NULL ||
+		    y->value == NULL || !cbl_dvalue_equal(ks->type, x->value,
+		    y->value))
+			return (false);
+	}
+	return (true);
+}
+
+const cbl_dnode *
+cbl_d_counterpart(const cbl_dtree *t, const cbl_dnode *k)
+{
+	const cbl_dnode *chain[CBL_D_DEPTH_MAX + 1], *at;
+	size_t nc = 0;
+
+	for (const cbl_dnode *x = k; x != NULL && x->sn != NULL;
+	    x = x->parent) {
+		if (nc == sizeof(chain) / sizeof(chain[0]))
+			return (NULL);
+		chain[nc++] = x;
+	}
+	at = &t->root;
+	while (nc-- > 0 && at != NULL) {
+		const cbl_dnode *y;
+
+		for (y = at->first; y != NULL; y = y->next)
+			if (y->sn == chain[nc]->sn &&
+			    same_instance(y, chain[nc]))
+				break;
+		at = y;
+	}
+	return (at);
 }

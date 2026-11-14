@@ -1649,8 +1649,7 @@ cbl_yiid_read(const struct cbl_yschema *s, const struct cbl_bytes *v,
     const struct cbl_ynode **node, const void ***vals, size_t *nvals,
     cbl_yarena *a)
 {
-	struct yrd r = { v->p, (const uint8_t *)v->p + v->len, v->p, a, 0,
-	    NULL, 0, NULL };
+	struct yrd r;
 	const struct cbl_ynode *n, *chain[YDEPTH_MAX + 1];
 	const void **out;
 	uint64_t arg, sid, k = 1;
@@ -1661,6 +1660,8 @@ cbl_yiid_read(const struct cbl_yschema *s, const struct cbl_bytes *v,
 
 	if (s == NULL || v == NULL || v->p == NULL || v->len == 0)
 		return (EINVAL);
+	r = (struct yrd){ v->p, (const uint8_t *)v->p + v->len, v->p, a, 0,
+	    NULL, 0, NULL };
 	if ((error = peek(&r, &major, &arg, &hlen)) != 0)
 		return (error);
 	/* [SID, values...], or the SID alone. */
@@ -2011,18 +2012,25 @@ dec_tnode(struct yrd *r, cbl_dnode *parent, const struct cbl_ynode *sn,
 			return (error);
 		break;
 	case CBL_YN_LIST:
-		if ((error = dec_entry(r, parent, sn, depth, &x)) != 0)
-			return (error);
+		error = dec_entry(r, parent, sn, depth, &x);
 		break;
 	default:
 		if ((error = made(r, cbl_dnode_add(parent, sn, NULL, &x),
-		    sn)) != 0 || (error = dec_tmap(r, x, depth + 1)) != 0)
-			return (error);
+		    sn)) == 0)
+			error = dec_tmap(r, x, depth + 1);
 		break;
+	}
+	if (error == 0)
+		error = put_meta(r, x, mv, nm);
+	/* Made but not read through: not left half there in the tree. */
+	if (error != 0) {
+		if (x != NULL)
+			(void)cbl_dnode_remove(x);
+		return (error);
 	}
 	if (out != NULL)
 		*out = x;
-	return (put_meta(r, x, mv, nm));
+	return (0);
 }
 
 /* x's children, keyed by deltas from it (by SID at the root). */

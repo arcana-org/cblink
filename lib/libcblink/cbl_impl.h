@@ -630,6 +630,9 @@ struct cbl_tr_ops {
 	int	(*handshake)(cbl_conn *);
 	/* 0 with *got > 0, 0 with *got == 0 for EOF, EAGAIN, or errno. */
 	int	(*read)(cbl_conn *, void *, size_t, size_t *got);
+	/* Optional: bytes read from the socket but not yet by "read" (TLS:
+	 * the rest of a record), which no event will tell of. */
+	bool	(*pending)(cbl_conn *);
 	int	(*write)(cbl_conn *, const void *, size_t, size_t *put);
 	/* Optional: several frames in one call (plain byte streams). */
 	int	(*writev)(cbl_conn *, const struct iovec *, int, size_t *put);
@@ -687,6 +690,9 @@ struct cbl_txent {
 	cbl_msg			*msg;
 	size_t			 off;
 	bool			 control;	/* queued ahead of the rest */
+	/* A write of it tried: begun, though none of it may have gone
+	 * (DTLS holds a record a write wants again, the same). */
+	bool			 begun;
 };
 
 /* Outstanding request issued by this endpoint. */

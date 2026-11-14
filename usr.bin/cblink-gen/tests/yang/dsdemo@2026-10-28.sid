@@ -70,6 +70,16 @@
         "namespace": "data",
         "identifier": "/dsdemo:cfg/level",
         "sid": "82911"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/dsdemo:refs",
+        "sid": "82912"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/dsdemo:refs/to-b",
+        "sid": "82913"
       }
     ]
   }

@@ -513,6 +513,94 @@ ATF_TC_BODY(json_text, tc)
 	cbl_ysids_free(s);
 }
 
+/*
+ * A member's name is one name: "item/count" (a path) refused, not taken
+ * as the grandchild keyed by a delta from the wrong node; "x" and "m:x"
+ * name one child, which may be there once.  A decimal64 given as a JSON
+ * number read as its digits are, never through a double: 1.234 for two
+ * fraction digits refused, not rounded.
+ */
+ATF_TC_WITHOUT_HEAD(member_names);
+ATF_TC_BODY(member_names, tc)
+{
+	struct cbl_ysids	*s = view(tc, 0, NULL, 0);
+	struct cbl_ybuf		 c = { NULL, 0, 0 };
+	const struct cbl_ysid_item *it;
+	const char		*tag = NULL;
+	char			 why[256];
+	static const char price[] = "{\"example-foomod:top\":"
+	    "{\"price\":12.25}}";
+	/* {top: {price's delta: 4([-2, 1225])}} */
+	static const uint8_t want[] = { 0xc4, 0x82, 0x21, 0x19, 0x04, 0xc9 };
+
+	refused(s, "{\"example-foomod:top\":{\"item/count\":5}}",
+	    "malformed-message");
+	refused(s, "{\"example-foomod:top/foo\":5}", "malformed-message");
+	refused(s, "{\"example-foomod:top\":{\"\":5}}", "malformed-message");
+	refused(s, "{\"example-foomod:top\":{\"foo\":1,"
+	    "\"example-foomod:foo\":2}}", "malformed-message");
+	refused(s, "{\"example-foomod:top\":{\"price\":1.234}}",
+	    "invalid-value");
+	refused(s, "{\"example-foomod:top\":{\"price\":0.125}}",
+	    "invalid-value");
+	ATF_REQUIRE_MSG(cbl_yxlate_cbor(s, price, strlen(price), &c, &tag, why,
+	    sizeof(why)) == 0, "%s %s", tag, why);
+	ATF_CHECK(memmem(c.p, c.len, want, sizeof(want)) != NULL);
+	cbl_ybuf_free(&c);
+	/* The child of the node encoded keyed from it, the member form. */
+	ATF_REQUIRE((it = cbl_ysids_data(s, "/example-foomod:top")) != NULL);
+	ATF_CHECK(cbl_yxlate_cbor_member(s, it, "{\"item/count\":5}",
+	    strlen("{\"item/count\":5}"), &c, &tag, why, sizeof(why)) != 0);
+	cbl_ybuf_free(&c);
+	cbl_ysids_free(s);
+}
+
+/*
+ * .sid files: an item without its namespace refused (not taken as an
+ * annotation); one path by two SIDs refused; an identifier with a NUL
+ * in it refused.
+ */
+ATF_TC_WITHOUT_HEAD(sid_items);
+ATF_TC_BODY(sid_items, tc)
+{
+	static const char nons[] = "{\"module-name\":\"m\",\"item\":"
+	    "[{\"identifier\":\"/m:a\",\"sid\":\"5\"}]}";
+	static const char two[] = "{\"module-name\":\"m\",\"item\":"
+	    "[{\"namespace\":\"data\",\"identifier\":\"/m:a\","
+	    "\"sid\":\"5\"},{\"namespace\":\"data\",\"identifier\":"
+	    "\"/m:a\",\"sid\":\"6\"}]}";
+	/* {module-name: "m", item: [{identifier: "/m:a", sid: 5}]}, as
+	 * RFC 9595's YANG-CBOR: deltas from 1301, then from 1309. */
+	static const uint8_t nons_cbor[] = { 0xa2, 0x0d, 0x61, 0x6d, 0x08,
+	    0x81, 0xa2, 0x01, 0x64, 0x2f, 0x6d, 0x3a, 0x61, 0x03, 0x05 };
+	/* The same, namespace data, its identifier "/m:a" NUL "x". */
+	static const uint8_t nul_cbor[] = { 0xa2, 0x0d, 0x61, 0x6d, 0x08,
+	    0x81, 0xa3, 0x01, 0x66, 0x2f, 0x6d, 0x3a, 0x61, 0x00, 0x78, 0x02,
+	    0x03, 0x03, 0x05 };
+	struct cbl_ysids	*e;
+	char			 why[256];
+
+	(void)tc;
+	ATF_REQUIRE((e = cbl_ysids_new(&yxtest_schema)) != NULL);
+	ATF_CHECK_EQ(EINVAL, cbl_ysids_file_json(e, nons, strlen(nons), why,
+	    sizeof(why)));
+	cbl_ysids_free(e);
+	ATF_REQUIRE((e = cbl_ysids_new(&yxtest_schema)) != NULL);
+	ATF_REQUIRE_EQ(0, cbl_ysids_file_json(e, two, strlen(two), why,
+	    sizeof(why)));
+	ATF_CHECK_EQ(EINVAL, cbl_ysids_done(e, why, sizeof(why)));
+	ATF_CHECK_MSG(strstr(why, "two SIDs") != NULL, "%s", why);
+	cbl_ysids_free(e);
+	ATF_REQUIRE((e = cbl_ysids_new(&yxtest_schema)) != NULL);
+	ATF_CHECK_EQ(EINVAL, cbl_ysids_file_cbor(e, nons_cbor,
+	    sizeof(nons_cbor), why, sizeof(why)));
+	cbl_ysids_free(e);
+	ATF_REQUIRE((e = cbl_ysids_new(&yxtest_schema)) != NULL);
+	ATF_CHECK_EQ(EINVAL, cbl_ysids_file_cbor(e, nul_cbor,
+	    sizeof(nul_cbor), why, sizeof(why)));
+	cbl_ysids_free(e);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -520,5 +608,7 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, rfc7952);
 	ATF_TP_ADD_TC(tp, peer_sids);
 	ATF_TP_ADD_TC(tp, json_text);
+	ATF_TP_ADD_TC(tp, member_names);
+	ATF_TP_ADD_TC(tp, sid_items);
 	return (atf_no_error());
 }

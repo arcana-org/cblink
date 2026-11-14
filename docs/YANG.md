@@ -154,6 +154,12 @@ value is its canonical form, an identityref's `module:name`, an
 instance-identifier's path with each name by its module.
 The evaluator is held to libyang's on the corpus (TESTING.md: `xpdiff`),
 and agrees with it but where libyang departs from XPath 1.0 or RFC 7950.
+An expression's work is bounded (`CBL_XP_WORK_MAX`, EFBIG past it): a
+node visited, a call, each pair of nodes two node sets compare, each
+character a string function reads, and for `re-match()` its pattern's
+compiled size and each character matched, more the larger the pattern.
+Each string function reads its strings once, and an evaluation
+compiles a `re-match()` pattern once, not once a node.
 `cbl_dtree_check_conds()` holds a tree to its `when`s and `must`s
 (unknown-element; operation-failed and the `must`'s `error-message` and
 `error-app-tag`, `must-violation` if it has none), a node's own `when`
@@ -178,7 +184,10 @@ A `pattern` is an XSD regular expression, translated at generation time
 to a POSIX ERE that `regcomp(3)` compiles, and refused with the reason
 where it cannot be: back-references and escapes XSD has not, character
 class subtraction, Unicode categories and blocks no POSIX class matches,
-a complement inside a class, counts over `RE_DUP_MAX`. `\d`, `\p{L}`,
+a complement inside a class, counts over `RE_DUP_MAX`, and counts that
+make the ERE over `CBL_PAT_MAX_EXPANDED` (32768 bytes) once
+`regcomp(3)` has copied each counted atom as often as its count says:
+nested counts multiply. `\d`, `\p{L}`,
 `\p{Lu}`, `\p{Ll}` and `\p{Nd}` are FreeBSD's Unicode classes in
 `C.UTF-8`; `\p{N}` and `\w` are narrower than XSD's.
 
@@ -221,7 +230,16 @@ program's family flagged `nacm` (an rpc of the module named as the
 family). The user is a request's, as the program's `cbl_user_f` names
 it from the peer and from the `user` structure a trusted peer sends; the
 recovery session (by default root on a unix socket) is let through.
-`nacm:default-deny-write` and `-all` are the tables' node flags.
+`nacm:default-deny-write` and `-all` are the tables' node flags. A
+delete is checked for every node it takes away, each below the node
+named too (RFC 8341 section 3.2.5). A path rule's key predicates are
+held to an action's target; a notification of a list entry, sent
+without its keys, meets a deny with predicates as matching and a permit
+as not. Rules that cannot be read deny everything but the recovery
+session; a deny rule whose path does not compile denies, to its
+rule-list's groups and for its operations, all of its module (its
+`module-name`, else its path's first step's module, else every module);
+`cbl_ynacm_status()` says why.
 
 Datastores (RFC 8342), where a program asks for them
 (`cbl_ydatastores()`): `running`, the configuration its handlers keep;
@@ -232,7 +250,18 @@ changes running. The server serves `ietf-netconf` with its features
 `candidate` and `confirmed-commit`, and cblink answers its `commit`,
 `cancel-commit` and `discard-changes` itself: a commit changes, through
 the handlers, every top-level node the candidate has otherwise than
-running, all or nothing, NACM's write checks each; a confirmed commit
+running, all or nothing, NACM's write checks each; the candidate is held
+first as a whole to its `when`s, `must`s, the mandatory nodes a `when`
+brings, and its leafrefs and instance-identifiers with
+require-instance (RFC 7950 section 8.3), so a change cannot leave
+another node's reference dangling or its `must` false; an EDIT of
+running itself is held to the same, running as it would be after it
+read through the handlers. What running already had failing, the same
+condition of the same node, a node the change leaves as it was with all
+below it, refuses nothing: it is a warning of the answer (`cbl_msg_ywarnings()`),
+the node named only to a requester NACM lets read it; running before is
+looked at only for the nodes that fail after, each alone. An EDIT of the candidate checks the nodes it
+names alone, the rest at the commit. A confirmed commit
 (section 8.4) is undone at its `confirm-timeout`, by `cancel-commit`, or
 when its session goes without `persist`, unless a commit confirms it
 (its session's, or any with its `persist-id`). A GET's `with-defaults`
@@ -255,7 +284,14 @@ is the program's to hear of, and the undo stops there; an undo needs
 no consent its commit had (`cbl_req_yundo()`). A get handler
 reading for running (`cbl_req_ydatastore()`) leaves out what is no
 configuration. With `CBL_YDS_CONFIRMED` running changes by
-a confirmed commit alone. A handler refuses what its requester should be
+a confirmed commit alone. With `CBL_YDS_REFS_WARN`, for a running that
+is a view of a live system (what a reference names may come later: an
+interface a service makes), a leafref or instance-identifier with
+require-instance whose target is not there is a warning of an EDIT of
+running or a commit, new or old, never a refusal; `when`, `must` and
+what a `when` makes mandatory are held as without it. An EDIT of the
+candidate checks the `when`s, `must`s and mandatory nodes of the nodes
+it names and no references, with the flag or without, as before. A handler refuses what its requester should be
 warned of with an `error-app-tag`, unless the request `accept`s it, and
 tells what it did in the answer's `warnings`.
 

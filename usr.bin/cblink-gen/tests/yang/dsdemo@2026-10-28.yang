@@ -88,6 +88,19 @@ module dsdemo {
     }
   }
 
+  container refs {
+    description
+      "Outside cfg, what depends on it: a change of cfg alone that
+       leaves it dangling is refused.";
+    leaf to-b {
+      type leafref {
+        path "/dd:cfg/dd:b";
+      }
+      description
+        "cfg's b, which must be there.";
+    }
+  }
+
   grouping tagging {
     description
       "What kind tagged needs.";

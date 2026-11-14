@@ -39,6 +39,15 @@
 #include "cbl_xpath.h"
 #include "cbl_yimpl.h"
 
+/* re-match()'s patterns, compiled once an evaluation. */
+#define	EV_NRE	4
+
+struct ev_re {
+	char		*pat;		/* NULL: free */
+	regex_t		 re;
+	size_t		 cost;		/* a character matched, in work */
+};
+
 struct ev {
 	const cbl_dtree		*t;
 	const cbl_dnode		*cur;
@@ -46,8 +55,11 @@ struct ev {
 	char			*why;
 	size_t			 whylen;
 	int			 depth;
-	size_t			 work;		/* nodes visited, and calls */
+	size_t			 work;		/* nodes visited, calls, pairs,
+						 * characters */
 	bool			 over;		/* more than CBL_XP_WORK_MAX */
+	struct ev_re		 re[EV_NRE];
+	unsigned		 renext;	/* the slot taken next */
 };
 
 static int
@@ -61,6 +73,30 @@ fail(struct ev *e, int error, const char *fmt, ...)
 		va_end(ap);
 	}
 	return (error);
+}
+
+/*
+ * n more units of work: false, and the evaluation over, past
+ * CBL_XP_WORK_MAX.  A node visited, a call, a pair of nodes compared and
+ * a character a string function reads are one each.
+ */
+static bool
+charge(struct ev *e, size_t n)
+{
+
+	if (e->over || n > CBL_XP_WORK_MAX - e->work) {
+		e->over = true;
+		return (false);
+	}
+	e->work += n;
+	return (true);
+}
+
+static int
+over(struct ev *e)
+{
+
+	return (fail(e, EFBIG, "too much to evaluate"));
 }
 
 void
@@ -441,10 +477,8 @@ seen(struct ev *e, const cbl_dnode *c)
 	const struct cbl_d_view *w = e->view;
 
 	/* Each node visited counts: an expression's work is bounded. */
-	if (++e->work > CBL_XP_WORK_MAX) {
-		e->over = true;
+	if (!charge(e, 1))
 		return (false);
-	}
 	if (w == NULL)
 		return (true);
 	if (w->dummy != NULL && c->parent == w->dummy)
@@ -747,7 +781,7 @@ static int
 compare(struct ev *e, enum cbl_xp_kind op, const struct cbl_xval *a,
     const struct cbl_xval *b, bool *out)
 {
-	struct cbl_xval x, y;
+	struct cbl_xval x;
 	int error;
 
 	*out = false;
@@ -761,33 +795,39 @@ compare(struct ev *e, enum cbl_xp_kind op, const struct cbl_xval *a,
 		return (cmp_atoms(e, op, &ba, &bb, out));
 	}
 	/* Two node sets: some pair whose strings compare so (numbers, for
-	 * an order: cmp_atoms() takes two strings so). */
+	 * an order: cmp_atoms() takes two strings so).  The other side's
+	 * strings are made once; each pair tried is work. */
 	if (a->kind == CBL_XV_NODES && b->kind == CBL_XV_NODES) {
-		for (size_t i = 0; i < a->n && !*out; i++) {
+		struct cbl_xval *ys;
+
+		if (a->n == 0 || b->n == 0)
+			return (0);
+		if ((ys = calloc(b->n, sizeof(*ys))) == NULL)
+			return (ENOMEM);
+		error = 0;
+		for (size_t j = 0; j < b->n && error == 0; j++)
+			error = node_atom(e, b->nodes[j], &ys[j]);
+		for (size_t i = 0; i < a->n && !*out && error == 0; i++) {
 			if ((error = node_atom(e, a->nodes[i], &x)) != 0)
-				return (error);
-			for (size_t j = 0; j < b->n && !*out; j++) {
-				if ((error = node_atom(e, b->nodes[j],
-				    &y)) != 0) {
-					cbl_xval_free(&x);
-					return (error);
-				}
-				error = cmp_atoms(e, op, &x, &y, out);
-				cbl_xval_free(&y);
-				if (error != 0) {
-					cbl_xval_free(&x);
-					return (error);
-				}
-			}
+				break;
+			for (size_t j = 0; j < b->n && !*out && error == 0;
+			    j++)
+				error = charge(e, 1) ? cmp_atoms(e, op, &x,
+				    &ys[j], out) : over(e);
 			cbl_xval_free(&x);
 		}
-		return (0);
+		for (size_t j = 0; j < b->n; j++)
+			cbl_xval_free(&ys[j]);
+		free(ys);
+		return (error);
 	}
 	if (a->kind == CBL_XV_NODES || b->kind == CBL_XV_NODES) {
 		const struct cbl_xval *set = a->kind == CBL_XV_NODES ? a : b;
 		const struct cbl_xval *other = set == a ? b : a;
 
 		for (size_t i = 0; i < set->n && !*out; i++) {
+			if (!charge(e, 1))
+				return (over(e));
 			if ((error = node_atom(e, set->nodes[i], &x)) != 0)
 				return (error);
 			/* Against a number, the node's as a number. */
@@ -990,17 +1030,62 @@ u8count(const char *s)
 	return (n);
 }
 
-/* The character of s at index i (from 0), and its length; NULL: none. */
-static const char *
-u8at(const char *s, size_t i, size_t *len)
-{
+/*
+ * translate()'s map: for each character of from, the first time it is
+ * there, what it becomes (to's character at the same place, none past
+ * its end).  ASCII by a table, the rest searched.
+ */
+struct trmap {
+	const char	*asc[128];	/* NULL: not in from */
+	size_t		 asclen[128];
+	bool		 ascin[128];
+	struct {
+		const char	*from, *to;
+		size_t		 flen, tlen;
+	}		*v;
+	size_t		 n;
+};
 
-	for (; *s != '\0'; s += u8len(s))
-		if (i-- == 0) {
-			*len = u8len(s);
-			return (s);
+static int
+trmap_make(struct ev *e, struct trmap *m, const char *from, const char *to)
+{
+	size_t fl, tl;
+
+	memset(m, 0, sizeof(*m));
+	if (!charge(e, strlen(from) + strlen(to)))
+		return (over(e));
+	if ((m->v = calloc(strlen(from) + 1, sizeof(*m->v))) == NULL)
+		return (ENOMEM);
+	for (; *from != '\0'; from += fl) {
+		const char *t = *to != '\0' ? to : NULL;
+		bool dup = false;
+
+		fl = u8len(from);
+		tl = t != NULL ? u8len(t) : 0;
+		if (fl == 1 && (unsigned char)*from < 128) {
+			unsigned char c = (unsigned char)*from;
+
+			if (!m->ascin[c]) {
+				m->ascin[c] = true;
+				m->asc[c] = t;
+				m->asclen[c] = tl;
+			}
+		} else {
+			for (size_t k = 0; k < m->n && !dup; k++)
+				dup = m->v[k].flen == fl &&
+				    memcmp(m->v[k].from, from, fl) == 0;
+			if (!charge(e, m->n))
+				return (over(e));
+			if (!dup) {
+				m->v[m->n].from = from;
+				m->v[m->n].flen = fl;
+				m->v[m->n].to = t;
+				m->v[m->n++].tlen = tl;
+			}
 		}
-	return (NULL);
+		to += tl;
+	}
+	return (0);
 }
 
 /* XPath's round(): to the nearest, halves up (section 4.4). */
@@ -1121,7 +1206,8 @@ func_strings(struct ev *e, const char *f, struct cbl_xval *a, size_t n,
 	if (strcmp(f, "concat") == 0 && n >= 2) {
 		for (size_t i = 0; i < n && error == 0; i++)
 			if ((error = str_arg(e, &a[i], &s1)) == 0) {
-				error = sb_add(&b, s1, strlen(s1));
+				error = charge(e, strlen(s1)) ? sb_add(&b, s1,
+				    strlen(s1)) : over(e);
 				free(s1);
 				s1 = NULL;
 			}
@@ -1136,6 +1222,12 @@ func_strings(struct ev *e, const char *f, struct cbl_xval *a, size_t n,
 		return (error);
 	if (n >= 2 && (error = str_arg(e, &a[1], &s2)) != 0)
 		goto out;
+	/* What is read is work: each string once at least. */
+	if (!charge(e, (s1 != NULL ? strlen(s1) : 0) +
+	    (s2 != NULL ? strlen(s2) : 0))) {
+		error = over(e);
+		goto out;
+	}
 	if (strcmp(f, "contains") == 0 && n == 2)
 		set_bool(out, strstr(s1, s2) != NULL);
 	else if (strcmp(f, "starts-with") == 0 && n == 2)
@@ -1162,12 +1254,16 @@ func_strings(struct ev *e, const char *f, struct cbl_xval *a, size_t n,
 		len = xround(len);
 		if ((error = sb_add(&b, "", 0)) != 0)
 			goto out;
-		for (size_t i = 0; (c = u8at(s1, i, &cl)) != NULL && error == 0;
-		    i++) {
+		/* One walk of s1, a character at a time. */
+		c = s1;
+		for (size_t i = 0; *c != '\0' && error == 0; i++, c += cl) {
 			double pos = (double)(i + 1);
 
+			cl = u8len(c);
 			if (pos >= start && pos < start + len)
 				error = sb_add(&b, c, cl);
+			else if (pos >= start + len)
+				break;
 		}
 		if (error == 0) {
 			error = set_string(out, b.p);
@@ -1196,24 +1292,45 @@ func_strings(struct ev *e, const char *f, struct cbl_xval *a, size_t n,
 			b.p = NULL;
 		}
 	} else if (strcmp(f, "translate") == 0 && n == 3) {
+		struct trmap m;
+
 		if ((error = str_arg(e, &a[2], &s3)) != 0 ||
 		    (error = sb_add(&b, "", 0)) != 0)
 			goto out;
 		/* Each character of s1: as at the same place in s3, where it
-		 * is in s2; else itself; none, s3 being shorter. */
-		for (size_t i = 0; (c = u8at(s1, i, &cl)) != NULL && error == 0;
-		    i++) {
-			const char *fc, *tc;
-			size_t fl, tl, k;
-
-			for (k = 0; (fc = u8at(s2, k, &fl)) != NULL; k++)
-				if (fl == cl && memcmp(fc, c, cl) == 0)
-					break;
-			if (fc == NULL)
-				error = sb_add(&b, c, cl);
-			else if ((tc = u8at(s3, k, &tl)) != NULL)
-				error = sb_add(&b, tc, tl);
+		 * is in s2; else itself; none, s3 being shorter.  s2 and s3
+		 * are read once, then s1. */
+		if ((error = trmap_make(e, &m, s2, s3)) != 0) {
+			free(m.v);
+			goto out;
 		}
+		for (c = s1; *c != '\0' && error == 0; c += cl) {
+			unsigned char uc = (unsigned char)*c;
+			size_t k;
+
+			cl = u8len(c);
+			if (cl == 1 && uc < 128) {
+				if (!m.ascin[uc])
+					error = sb_add(&b, c, cl);
+				else if (m.asc[uc] != NULL)
+					error = sb_add(&b, m.asc[uc],
+					    m.asclen[uc]);
+				continue;
+			}
+			if (!charge(e, m.n)) {
+				error = over(e);
+				break;
+			}
+			for (k = 0; k < m.n; k++)
+				if (m.v[k].flen == cl &&
+				    memcmp(m.v[k].from, c, cl) == 0)
+					break;
+			if (k == m.n)
+				error = sb_add(&b, c, cl);
+			else if (m.v[k].to != NULL)
+				error = sb_add(&b, m.v[k].to, m.v[k].tlen);
+		}
+		free(m.v);
 		if (error == 0) {
 			error = set_string(out, b.p);
 			b.p = NULL;
@@ -1226,6 +1343,56 @@ out:
 	free(s2);
 	free(s3);
 	return (error);
+}
+
+/*
+ * re-match()'s pattern pat compiled, from those this evaluation compiled
+ * already, else compiled and kept (the oldest of EV_NRE dropped): an
+ * expression tried on every node compiles its pattern once.
+ */
+static int
+re_get(struct ev *e, const char *pat, struct ev_re **rp)
+{
+	struct ev_re *r;
+	char why[128];
+	size_t pos, size;
+
+	for (unsigned k = 0; k < EV_NRE; k++)
+		if (e->re[k].pat != NULL && strcmp(e->re[k].pat, pat) == 0) {
+			*rp = &e->re[k];
+			return (0);
+		}
+	r = &e->re[e->renext];
+	if (r->pat != NULL) {
+		cbl_pattern_free(&r->re);
+		free(r->pat);
+		r->pat = NULL;
+	}
+	if ((r->pat = strdup(pat)) == NULL)
+		return (ENOMEM);
+	/* Compiling it is work too, as much as its size. */
+	if (cbl_pattern_compile_size(pat, &r->re, &size, why, sizeof(why),
+	    &pos) != 0) {
+		free(r->pat);
+		r->pat = NULL;
+		return (fail(e, EINVAL, "re-match(): %s", why));
+	}
+	r->cost = 1 + size / 64;
+	e->renext = (e->renext + 1) % EV_NRE;
+	*rp = r;
+	return (charge(e, size) ? 0 : over(e));
+}
+
+static void
+ev_done(struct ev *e)
+{
+
+	for (unsigned k = 0; k < EV_NRE; k++)
+		if (e->re[k].pat != NULL) {
+			cbl_pattern_free(&e->re[k].re);
+			free(e->re[k].pat);
+			e->re[k].pat = NULL;
+		}
 }
 
 static int
@@ -1328,9 +1495,7 @@ eval_func(struct ev *e, const struct cbl_xp *x, const cbl_dnode *ctx,
 		free(str);
 		set_bool(out, set);
 	} else if (strcmp(f, "re-match") == 0 && n == 2) {
-		regex_t re;
-		char why[128];
-		size_t pos;
+		struct ev_re *re;
 
 		if ((error = to_string(e, &a[0], &str)) != 0)
 			goto out;
@@ -1338,12 +1503,17 @@ eval_func(struct ev *e, const struct cbl_xp *x, const cbl_dnode *ctx,
 			free(str);
 			goto out;
 		}
-		if (cbl_pattern_compile(str2, &re, why, sizeof(why), &pos) !=
-		    0)
-			error = fail(e, EINVAL, "re-match(): %s", why);
-		else {
-			set_bool(out, cbl_pattern_match(&re, str));
-			cbl_pattern_free(&re);
+		/* The pattern compiled once; each character of the value
+		 * matched costs more the larger the pattern is. */
+		if ((error = re_get(e, str2, &re)) == 0) {
+			if (strlen(str) > (CBL_XP_WORK_MAX - e->work) /
+			    re->cost) {
+				e->over = true;
+				error = over(e);
+			} else if (!charge(e, strlen(str) * re->cost))
+				error = over(e);
+			else
+				set_bool(out, cbl_pattern_match(&re->re, str));
 		}
 		free(str);
 		free(str2);
@@ -1369,10 +1539,8 @@ eval(struct ev *e, const struct cbl_xp *x, const cbl_dnode *ctx,
 	int error;
 
 	memset(out, 0, sizeof(*out));
-	if (e->over || ++e->work > CBL_XP_WORK_MAX) {
-		e->over = true;
-		return (fail(e, EFBIG, "too much to evaluate"));
-	}
+	if (!charge(e, 1))
+		return (over(e));
 	if (++e->depth > CBL_XP_MAX_HEIGHT) {
 		e->depth--;
 		return (fail(e, ELOOP, "nested too deep"));
@@ -1572,6 +1740,7 @@ cbl_d_xp_eval(const cbl_dtree *t, const char *expr, const cbl_dnode *ctx,
 	if ((x = cbl_xp_parse(expr, perr, sizeof(perr), &pos)) == NULL)
 		return (fail(&e, EINVAL, "at %zu: %s", pos, perr));
 	error = eval(&e, x, ctx, out);
+	ev_done(&e);
 	cbl_xp_free(x);
 	return (error);
 }

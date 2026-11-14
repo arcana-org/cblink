@@ -24,6 +24,7 @@
 /* The longest pattern taken, and the deepest nesting of groups. */
 #define	CBL_PAT_MAX_LEN		4096
 #define	CBL_PAT_MAX_DEPTH	32
+#define	CBL_PAT_MAX_EXPANDED	32768	/* the ERE, its counts expanded */
 
 /*
  * Make the C.UTF-8 locale matching uses: done by the first compile, or
@@ -47,9 +48,17 @@ char	*cbl_pattern_ere(const char *xsd, char *why, size_t whylen,
 int	 cbl_pattern_compile(const char *xsd, regex_t *re, char *why,
 	    size_t whylen, size_t *pos);
 
-/* Does the value match the compiled pattern, as a whole? */
+/*
+ * The same, *size (when not NULL) the ERE's size once regcomp(3) has
+ * expanded its counts, at most CBL_PAT_MAX_EXPANDED: what matching a
+ * character costs grows with it.
+ */
+int	 cbl_pattern_compile_size(const char *xsd, regex_t *re,
+	    size_t *size, char *why, size_t whylen, size_t *pos);
+
 int	 cbl_pattern_compile_ere(const char *ere, regex_t *re);
 
+/* Does the value match the compiled pattern, as a whole? */
 bool	 cbl_pattern_match(const regex_t *re, const char *value);
 
 void	 cbl_pattern_free(regex_t *re);
