@@ -116,10 +116,13 @@ req_end(cbl_req *req, int error)
 		return (true);
 	}
 	if (error != 0) {
+		/* A stream open refused before its handler (by whom it is
+		 * for, by NACM) is answered as one, else the opener waits. */
 		(void)send_error_ext(req->conn, &req->hdr, error, req->err_msg,
 		    req->err_path, req->err_pathlen, req->err_miss,
 		    req->has_cookie ? req->cookie : NULL, req->cookie_len,
-		    dump ? CBL_F_MULTI | CBL_F_DONE : 0, req);
+		    dump ? CBL_F_MULTI | CBL_F_DONE : req->hdr.flags &
+		    CBL_F_S_OPEN, req);
 	} else if (dump || (req->hdr.flags & CBL_F_ACK) != 0) {
 		if (cbl_msg_alloc_empty(&req->conn->lim, &msg) == 0) {
 			msg->hdr.family = req->hdr.family;

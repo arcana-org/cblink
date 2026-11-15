@@ -626,6 +626,37 @@ ATF_TC_BODY(rejected, tc)
 	fx_teardown(&f);
 }
 
+static int
+let_none_in(const cbl_peer *peer __unused, const char *said __unused,
+    char *name __unused, size_t len __unused, bool *recovery __unused,
+    void *arg __unused)
+{
+
+	return (EACCES);
+}
+
+/*
+ * An open refused before its handler, by whom it is for (as NACM's refusal
+ * is): the error carries S_OPEN and the stream, so the open fails at once
+ * instead of waiting for the connection to close.
+ */
+ATF_TC_WITHOUT_HEAD(refused_before_handler);
+ATF_TC_BODY(refused_before_handler, tc)
+{
+	struct fx f;
+	struct cli c;
+
+	fx_setup(&f, 0, 0, 0);
+	ATF_REQUIRE_EQ(0, cbl_ctx_set_user(f.sctx, let_none_in, NULL));
+	(void)open_stream(&f, S_CHAT, 0, &c, 0);
+	drive(f.c, &c.closed, 1, 3000);
+	ATF_REQUIRE_EQ(1, c.opened);
+	ATF_REQUIRE_EQ(EACCES, c.open_error);
+	ATF_REQUIRE_EQ(1, c.closed);
+	ATF_REQUIRE_EQ(0, f.sv.opened);
+	fx_teardown(&f);
+}
+
 /*
  * Flow control: the server grants credit only when told to, so the client
  * runs out, gets EAGAIN, and resumes on on_writable.
@@ -1203,6 +1234,7 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, echo);
 	ATF_TP_ADD_TC(tp, push);
 	ATF_TP_ADD_TC(tp, rejected);
+	ATF_TP_ADD_TC(tp, refused_before_handler);
 	ATF_TP_ADD_TC(tp, flow_control);
 	ATF_TP_ADD_TC(tp, close_handshake);
 	ATF_TP_ADD_TC(tp, max_streams);
