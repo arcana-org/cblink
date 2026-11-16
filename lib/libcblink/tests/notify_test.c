@@ -244,6 +244,39 @@ ATF_TC_BODY(subscribe, tc)
 	fx_teardown(&f);
 }
 
+/*
+ * Two subscriptions to one group on one connection: the server keeps one
+ * membership, so ending one leaves it, and the other still hears.
+ */
+ATF_TC_WITHOUT_HEAD(two_on_one_group);
+ATF_TC_BODY(two_on_one_group, tc)
+{
+	struct fx f;
+	struct rec r1 = { .in_order = true }, r2 = { .in_order = true };
+	cbl_conn *c;
+	cbl_sub *s1, *s2;
+
+	fx_setup(&f, 0);
+	c = fx_client(&f);
+	ATF_REQUIRE_EQ(0, cbl_subscribe(c, "news", "events", rec_cb, &r1, &s1));
+	ATF_REQUIRE_EQ(0, cbl_subscribe(c, "news", "events", rec_cb, &r2, &s2));
+	ATF_REQUIRE_EQ(0, cbl_unsubscribe(s1));
+	ATF_REQUIRE_EQ(0, cbl_ping(c, 2000));	/* what it sent, processed */
+	broadcast(&f, N_EVENT, G_EVENTS, 0, 10, 0);
+	drive(c, &r2.n, 10, 5000);
+	ATF_REQUIRE_EQ(10, r2.n);
+	ATF_REQUIRE_EQ(0, r1.n);
+	/* The last ends the membership. */
+	ATF_REQUIRE_EQ(0, cbl_unsubscribe(s2));
+	ATF_REQUIRE_EQ(0, cbl_ping(c, 2000));
+	broadcast(&f, N_EVENT, G_EVENTS, 10, 5, 0);
+	ATF_REQUIRE_EQ(0, cbl_ping(c, 2000));
+	drive(c, NULL, 0, 200);
+	ATF_REQUIRE_EQ(10, r2.n);
+	cbl_conn_free(c);
+	fx_teardown(&f);
+}
+
 ATF_TC_WITHOUT_HEAD(errors);
 ATF_TC_BODY(errors, tc)
 {
@@ -764,6 +797,7 @@ ATF_TP_ADD_TCS(tp)
 {
 
 	ATF_TP_ADD_TC(tp, subscribe);
+	ATF_TP_ADD_TC(tp, two_on_one_group);
 	ATF_TP_ADD_TC(tp, errors);
 	ATF_TP_ADD_TC(tp, many_subscribers);
 	ATF_TP_ADD_TC(tp, ctrl_notify);

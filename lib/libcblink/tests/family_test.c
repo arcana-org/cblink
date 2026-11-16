@@ -12,7 +12,7 @@
 #include "cbl_net_test.h"
 
 enum { T_ECHO = 1, T_FAIL, T_DEFER, T_LIST, T_SECRET, T_DUMPONLY, T_DEFERFAST,
-    T_BIG, T_FOREVER };
+    T_BIG, T_FOREVER, T_NEGATIVE, T_ENCODED };
 enum { TA_VAL = 1, TA_N, TA_DELAY, TA_IDX };
 
 /* The value back, if there is one. */
@@ -46,6 +46,34 @@ echo_doit(cbl_req *req, const cbl_msg *msg, void *arg)
 		return (ERANGE);
 	}
 	return (copy_doit(req, msg, arg));
+}
+
+/* A reply encoded before it is sent, its sequence number not yet the
+ * request's: cbl_req_send() sets it, on the wire too. */
+static int
+encoded_doit(cbl_req *req, const cbl_msg *msg, void *arg __unused)
+{
+	cbl_msg *rsp;
+	int error;
+
+	if ((error = cbl_req_reply_new(req, 0, &rsp)) != 0)
+		return (error);
+	(void)t_copy(rsp, msg, TA_VAL);
+	(void)cbl_msg_set_seq(rsp, 0);
+	if ((error = cbl_msg_encode(rsp, NULL, NULL)) != 0) {
+		cbl_msg_free(rsp);
+		return (error);
+	}
+	return (cbl_req_send(req, rsp));
+}
+
+/* A handler's mistake: an errno negated. */
+static int
+negative_doit(cbl_req *req __unused, const cbl_msg *msg __unused,
+    void *arg __unused)
+{
+
+	return (-EPERM);
 }
 
 static int
@@ -212,6 +240,10 @@ static const struct cbl_op test_ops[] = {
 	  .doit = big_doit },
 	{ .cmd = T_FOREVER, .name = "forever", .flags = CBL_OPF_DO,
 	  .doit = forever_doit },
+	{ .cmd = T_NEGATIVE, .name = "negative", .flags = CBL_OPF_DO,
+	  .doit = negative_doit },
+	{ .cmd = T_ENCODED, .name = "encoded", .flags = CBL_OPF_DO,
+	  .doit = encoded_doit },
 };
 
 static const struct cbl_mcgrp test_grps[] = {
@@ -400,6 +432,19 @@ ATF_TC_BODY(dispatch, tc)
 	ATF_REQUIRE_STREQ("handler says no", cbl_msg_err_str(rsp));
 	ATF_REQUIRE_EQ(0, cbl_msg_err_cookie(rsp, &ck, &len));
 	ATF_REQUIRE(len == 3 && memcmp(ck, "xyz", 3) == 0);
+	cbl_msg_free(rsp);
+
+	/* A reply encoded by its handler still answers the request. */
+	cbl_msg_new(f.cctx, f.id, T_ENCODED, 0, &req);
+	t_put_str(req, TA_VAL, "pong");
+	ATF_REQUIRE_EQ(0, cbl_request(f.c, req, &rsp, 2000));
+	ATF_REQUIRE(t_get_str(rsp, TA_VAL, s, sizeof(s)));
+	ATF_REQUIRE_STREQ("pong", s);
+	cbl_msg_free(rsp);
+
+	/* A code that is no errno is answered as EIO, not left unsaid. */
+	cbl_msg_new(f.cctx, f.id, T_NEGATIVE, 0, &req);
+	ATF_REQUIRE_EQ(EIO, cbl_request(f.c, req, &rsp, 2000));
 	cbl_msg_free(rsp);
 
 	/* Command errors. */

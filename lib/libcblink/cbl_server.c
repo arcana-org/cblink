@@ -28,6 +28,10 @@ send_error_ext(cbl_conn *conn, const struct cbl_hdr *h, int code,
 	cbl_msg *msg;
 	int error;
 
+	/* A handler's code that is no errno: answered as EIO, since an
+	 * error frame that cannot be built leaves the peer waiting. */
+	if (code <= 0)
+		code = EIO;
 	if ((error = cbl_msg_alloc_empty(&conn->lim, &msg)) != 0)
 		return (error);
 	msg->hdr.family = h->family;
@@ -386,6 +390,8 @@ cbl_req_send(cbl_req *req, cbl_msg *msg)
 	}
 	msg->hdr.seq = req->hdr.seq;
 	msg->hdr.family = req->hdr.family;
+	/* A reply the handler encoded already: its header as set here. */
+	cbl_msg_patch_hdr(msg);
 	return (cbl_conn_enqueue(req->conn, msg));
 }
 

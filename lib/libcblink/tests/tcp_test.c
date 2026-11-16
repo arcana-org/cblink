@@ -54,6 +54,16 @@ ATF_TC_BODY(plaintext_opt_in, tc)
 	    CBL_PLAINTEXT, &c));
 	ATF_REQUIRE_EQ(EINVAL, cbl_conn_new(ctx, "tcp://a,b:1", CBL_PLAINTEXT,
 	    &c));
+	/* A port is digits alone. */
+	ATF_REQUIRE_EQ(EINVAL, cbl_conn_new(ctx, "tcp://h:+80", CBL_PLAINTEXT,
+	    &c));
+	ATF_REQUIRE_EQ(EINVAL, cbl_conn_new(ctx, "tcp://h: 80", CBL_PLAINTEXT,
+	    &c));
+	ATF_REQUIRE_EQ(EINVAL, cbl_conn_new(ctx, "tcp://h:-1", CBL_PLAINTEXT,
+	    &c));
+	/* No more SCTP hosts than addresses are kept: refused, not cut. */
+	ATF_REQUIRE_EQ(EINVAL, cbl_conn_new(ctx,
+	    "sctp://a,b,c,d,e,f,g,h,i:1", CBL_PLAINTEXT, &c));
 	ATF_REQUIRE_EQ(0, cbl_conn_new(ctx, "tcp://[::1]:5", CBL_PLAINTEXT,
 	    &c));
 	cbl_conn_free(c);

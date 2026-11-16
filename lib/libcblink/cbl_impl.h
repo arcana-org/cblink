@@ -856,6 +856,7 @@ cbl_conn_loop(const cbl_conn *conn)
 
 	return (atomic_load(&conn->dead) ? NULL : conn->loop);
 }
+void	cbl_msg_patch_hdr(cbl_msg *msg);
 int	cbl_conn_send_error(cbl_conn *conn, const struct cbl_hdr *h,
 	    int code, const char *text);
 int	cbl_conn_wait(cbl_conn *conn, bool (*cond)(void *), void *arg);

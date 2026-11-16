@@ -46,6 +46,7 @@ cbl_uri_parse(const char *s, struct cbl_uri *u, char *err, size_t errlen)
 {
 	const char *rest, *colon;
 	size_t i, hlen;
+	int nhosts;
 	char *end;
 	long port;
 
@@ -85,8 +86,13 @@ cbl_uri_parse(const char *s, struct cbl_uri *u, char *err, size_t errlen)
 	u->host[hlen] = '\0';
 	if (u->transport != CBL_TR_SCTP && strchr(u->host, ',') != NULL)
 		ERR("only sctp:// accepts several hosts");
+	nhosts = 0;
 	for (const char *h = u->host; *h != '\0';) {
 		size_t n = strcspn(h, ",");
+
+		/* One address each, at most as many as are kept. */
+		if (++nhosts > CBL_URI_MAXADDR)
+			ERR("%d hosts at most in '%s'", CBL_URI_MAXADDR, s);
 
 		if (n == 0)
 			ERR("empty host in '%s'", s);
@@ -97,9 +103,11 @@ cbl_uri_parse(const char *s, struct cbl_uri *u, char *err, size_t errlen)
 		if (*h == ',')
 			h++;
 	}
+	/* Digits alone: strtol(3) would take a sign and white space. */
 	errno = 0;
 	port = strtol(colon + 1, &end, 10);
-	if (errno != 0 || *end != '\0' || end == colon + 1 || port < 0 ||
+	if (errno != 0 || *end != '\0' || end == colon + 1 ||
+	    colon[1 + strspn(colon + 1, "0123456789")] != '\0' ||
 	    port > 65535)
 		ERR("bad port in '%s'", s);
 	snprintf(u->port, sizeof(u->port), "%ld", port);

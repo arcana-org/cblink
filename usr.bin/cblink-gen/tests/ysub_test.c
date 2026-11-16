@@ -1080,11 +1080,11 @@ ATF_TC_BODY(modify, tc)
 	ATF_REQUIRE(strstr(c.json[2], "stream-xpath-filter") == NULL);
 	ATF_REQUIRE_STREQ("{\"level\":\"high\",\"text\":\"b\"}", c.json[3]);
 	pthread_mutex_unlock(&c.mtx);
-	cbl_ybuf_free(&fb);
-	/* Another connection's, or none: refused. */
+	/* Another connection's, or none: refused (mi's filter still fb's). */
 	mi.id = c.id + 100;
 	ATF_REQUIRE(call_rpc(&f, "ietf-subscribed-notifications",
 	    "modify-subscription", &mi) != 0);
+	cbl_ybuf_free(&fb);
 	cli_fini(&c);
 	teardown(&f);
 }

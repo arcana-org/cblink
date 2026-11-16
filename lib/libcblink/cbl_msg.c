@@ -116,8 +116,10 @@ cbl_msg_fail(cbl_msg *msg, int error, const char *why)
 	return (msg->error);
 }
 
-static void
-msg_patch_hdr(cbl_msg *msg)
+/* The header written again where the message is already encoded: what
+ * is set on it after its encoding reaches the wire. */
+void
+cbl_msg_patch_hdr(cbl_msg *msg)
 {
 
 	if (msg->finalized)
@@ -131,7 +133,7 @@ cbl_msg_set_seq(cbl_msg *msg, uint32_t seq)
 	if (msg == NULL || msg->decoded)
 		return (EINVAL);
 	msg->hdr.seq = seq;
-	msg_patch_hdr(msg);
+	cbl_msg_patch_hdr(msg);
 	return (0);
 }
 
@@ -142,7 +144,7 @@ cbl_msg_set_stream(cbl_msg *msg, uint32_t stream)
 	if (msg == NULL || msg->decoded)
 		return (EINVAL);
 	msg->hdr.stream = stream;
-	msg_patch_hdr(msg);
+	cbl_msg_patch_hdr(msg);
 	return (0);
 }
 
@@ -153,7 +155,7 @@ cbl_msg_set_flags(cbl_msg *msg, uint32_t flags)
 	if (msg == NULL || msg->decoded)
 		return (EINVAL);
 	msg->hdr.flags = flags;
-	msg_patch_hdr(msg);
+	cbl_msg_patch_hdr(msg);
 	return (0);
 }
 
@@ -401,8 +403,11 @@ cbl_msg_put_ynode(cbl_msg *msg, const struct cbl_ynode *n, const void *p)
 
 	if (msg == NULL || n == NULL || p == NULL)
 		return (EINVAL);
-	if ((error = cbl_yencode(n, p, &b)) != 0)
+	if ((error = cbl_yencode(n, p, &b)) != 0) {
+		/* What it wrote before it failed goes too. */
+		cbl_ybuf_free(&b);
 		return (cbl_msg_fail(msg, error, "cannot encode the value"));
+	}
 	/* An input or an output goes under its rpc's SID (CORECONF). */
 	error = cbl_msg_put_sid_raw(msg, cbl_ynode_base(n), b.p, b.len);
 	cbl_ybuf_free(&b);
@@ -420,8 +425,10 @@ cbl_msg_put_ymember(cbl_msg *msg, const struct cbl_ynode *n,
 		return (EINVAL);
 	if ((error = cbl_yencode_member(n, parent, &b)) == ENOENT)
 		return (0);	/* not there: nothing to say */
-	if (error != 0)
+	if (error != 0) {
+		cbl_ybuf_free(&b);
 		return (cbl_msg_fail(msg, error, "cannot encode the value"));
+	}
 	error = cbl_msg_put_sid_raw(msg, n->sid, b.p, b.len);
 	cbl_ybuf_free(&b);
 	return (error);

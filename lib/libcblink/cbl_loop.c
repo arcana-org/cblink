@@ -478,6 +478,7 @@ loop_once(cbl_loop *loop, int timeout_ms)
 	cbl_timer *t;
 	struct cbl_sig *s;
 	int n, rev;
+	bool posts = false;
 
 	if (timeout_ms >= 0) {
 		ts.tv_sec = timeout_ms / 1000;
@@ -488,8 +489,14 @@ loop_once(cbl_loop *loop, int timeout_ms)
 	if (n == -1)
 		return (errno == EINTR ? 0 : errno);
 	for (int i = 0; i < n; i++) {
+		/*
+		 * What was posted runs after the batch's other events: a
+		 * post may free what a later event of the batch names (a
+		 * listener let go), its descriptor's events gone from the
+		 * kqueue only once it is closed, not from this batch.
+		 */
 		if (evs[i].filter == EVFILT_USER) {
-			loop_run_posts(loop);
+			posts = true;
 			continue;
 		}
 		src = evs[i].udata;
@@ -542,6 +549,8 @@ loop_once(cbl_loop *loop, int timeout_ms)
 			break;
 		}
 	}
+	if (posts)
+		loop_run_posts(loop);
 	loop_reap(loop);
 	return (0);
 }

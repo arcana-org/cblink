@@ -606,6 +606,8 @@ cbl_conn_send_error(cbl_conn *conn, const struct cbl_hdr *h, int code,
 
 	if ((h->flags & CBL_F_REQUEST) == 0)
 		return (0);
+	if (code <= 0)
+		code = EIO;
 	if ((h->flags & CBL_F_S_OPEN) != 0)
 		flags |= CBL_F_S_OPEN;
 	if ((error = cbl_msg_alloc_empty(&conn->lim, &msg)) != 0)

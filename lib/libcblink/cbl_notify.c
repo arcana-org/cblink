@@ -99,9 +99,19 @@ cbl_sub_change(cbl_req *req, uint16_t family, uint32_t gid, bool subscribe)
 		    0, -1);
 		return (EACCES);
 	}
-	cbl_family_rele(fam);
 
+	/*
+	 * The family held, and asked whether it is gone, under the lock its
+	 * groups are cleared under when it is unregistered (after it is
+	 * said dead): a member is never added to a gone family's group.
+	 */
 	pthread_mutex_lock(&ctx->submtx);
+	if (fam->dead) {
+		pthread_mutex_unlock(&ctx->submtx);
+		cbl_family_rele(fam);
+		(void)cbl_req_set_err(req, "no such family", NULL, 0, -1);
+		return (ENOENT);
+	}
 	LIST_FOREACH(m, &conn->memberships, clink)
 		if (m->g->gid == gid)
 			break;
@@ -122,6 +132,7 @@ cbl_sub_change(cbl_req *req, uint16_t family, uint32_t gid, bool subscribe)
 	} else if (!subscribe && m != NULL)
 		member_remove(ctx, m);
 	pthread_mutex_unlock(&ctx->submtx);
+	cbl_family_rele(fam);
 	return (error);
 }
 
@@ -251,6 +262,8 @@ notify_prepare(cbl_family *fam, uint32_t group_idx, cbl_msg *msg)
 	msg->hdr.stream = fam->group_base + group_idx;
 	msg->control = (fam->def->mcgrps[group_idx].flags &
 	    CBL_MCF_CONTROL) != 0;
+	/* One the caller encoded already: its header as set here. */
+	cbl_msg_patch_hdr(msg);
 	return (cbl_msg_encode(msg, NULL, NULL));
 }
 
@@ -313,10 +326,21 @@ cbl_notify_if(cbl_family *fam, uint32_t group_idx, cbl_msg *msg,
 		}
 	}
 	pthread_mutex_unlock(&ctx->submtx);
-	for (size_t i = 0; i < k; i++) {
-		if (error == 0 && cbl_ynacm_notif(ctx, conns[i], &who[i], n))
+	/* NACM's say unlocked, it reads rules; delivered under the lock,
+	 * as every other delivery is (its counters are the lock's). */
+	for (size_t i = 0; i < k; i++)
+		if (error != 0 || !cbl_ynacm_notif(ctx, conns[i], &who[i], n)) {
+			cbl_conn_rele(conns[i]);
+			conns[i] = NULL;
+		}
+	pthread_mutex_lock(&ctx->submtx);
+	for (size_t i = 0; i < k; i++)
+		if (conns[i] != NULL)
 			(void)deliver(conns[i], msg);
-		cbl_conn_rele(conns[i]);
+	pthread_mutex_unlock(&ctx->submtx);
+	for (size_t i = 0; i < k; i++) {
+		if (conns[i] != NULL)
+			cbl_conn_rele(conns[i]);
 		free(users[i]);
 	}
 	free(users);
@@ -506,6 +530,33 @@ cbl_subscribe(cbl_conn *conn, const char *family, const char *group,
 	return (cbl_subscribe_id(conn, fid, gid, cb, arg, subp));
 }
 
+/*
+ * s taken off conn's list, dead: true when no notification has it pinned
+ * and it is the caller's to free, else the last to unpin frees it.
+ * conn's lock held.
+ */
+static bool
+sub_drop(cbl_conn *conn __unused, struct cbl_sub *s)
+{
+
+	LIST_REMOVE(s, link);
+	s->dead = true;
+	return (s->refs == 0);
+}
+
+/* Does another live subscription of conn hear family's group?  The
+ * server keeps one membership a connection and group.  conn's lock. */
+static bool
+group_heard(cbl_conn *conn, uint16_t family, uint32_t group)
+{
+	struct cbl_sub *o;
+
+	LIST_FOREACH(o, &conn->subs, link)
+		if (!o->dead && o->family == family && o->group == group)
+			return (true);
+	return (false);
+}
+
 static void
 unsub_done(cbl_conn *conn __unused, cbl_msg *reply __unused,
     bool final __unused, int error __unused, void *arg __unused)
@@ -522,14 +573,16 @@ cbl_unsubscribe(cbl_sub *s)
 {
 	cbl_conn *conn;
 	cbl_msg *msg;
-	bool free_now;
+	bool free_now, last;
 
 	if (s == NULL)
 		return (EINVAL);
 	conn = s->conn;
 	pthread_mutex_lock(&conn->mtx);
-	LIST_REMOVE(s, link);
-	s->dead = true;
+	(void)sub_drop(conn, s);
+	/* Another of the connection's still hears the group: the one
+	 * membership stays. */
+	last = !group_heard(conn, s->family, s->group);
 	if (!cbl_conn_io_thread(conn)) {
 		s->waiter = true;
 		while (s->refs > 0)
@@ -538,7 +591,7 @@ cbl_unsubscribe(cbl_sub *s)
 	/* Otherwise a callback still running frees it when it returns. */
 	free_now = s->refs == 0;
 	pthread_mutex_unlock(&conn->mtx);
-	if (conn->state == CBL_CS_OPEN && cbl_ctrl_sub_msg(conn, false,
+	if (last && conn->state == CBL_CS_OPEN && cbl_ctrl_sub_msg(conn, false,
 	    s->family, s->group, &msg) == 0)
 		(void)cbl_request_async(conn, msg, unsub_done, NULL);
 	if (free_now)
@@ -587,15 +640,18 @@ sub_done(cbl_conn *conn, cbl_msg *m __unused, bool final, int error,
 {
 	struct sub_call *sc = arg;
 	struct cbl_sub *s = sc->s;
+	bool free_now;
 
 	if (!final)
 		return;
 	if (error != 0) {
-		/* On the I/O thread: no notification runs for it now. */
+		/* A notification may have it pinned, on another thread of a
+		 * connection served by several: the last to unpin frees it. */
 		pthread_mutex_lock(&conn->mtx);
-		LIST_REMOVE(s, link);
+		free_now = sub_drop(conn, s);
 		pthread_mutex_unlock(&conn->mtx);
-		free(s);
+		if (free_now)
+			free(s);
 		s = NULL;
 	}
 	sc->done(conn, error, s, sc->arg);
@@ -608,6 +664,7 @@ sub_start(struct sub_call *sc, cbl_conn *conn, uint16_t family,
 {
 	struct cbl_sub *s;
 	cbl_msg *msg;
+	bool free_now;
 	int error;
 
 	if ((s = calloc(1, sizeof(*s))) == NULL)
@@ -625,9 +682,10 @@ sub_start(struct sub_call *sc, cbl_conn *conn, uint16_t family,
 	if ((error = cbl_ctrl_sub_msg(conn, true, family, group, &msg)) != 0 ||
 	    (error = cbl_request_async(conn, msg, sub_done, sc)) != 0) {
 		pthread_mutex_lock(&conn->mtx);
-		LIST_REMOVE(s, link);
+		free_now = sub_drop(conn, s);
 		pthread_mutex_unlock(&conn->mtx);
-		free(s);
+		if (free_now)
+			free(s);
 	}
 	return (error);
 }
