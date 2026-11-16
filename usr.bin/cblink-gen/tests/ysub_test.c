@@ -611,8 +611,9 @@ ATF_TC_BODY(told, tc)
 	wait_for(&c.records, 3, 3000);
 	ATF_REQUIRE_EQ(3, c.records);
 	ATF_REQUIRE_MATCH("\"subdemo:octets\":\"4500\"", c.json[2]);
-	cli_fini(&c);
+	/* The connection gone first: no record comes into c after. */
 	teardown(&f);
+	cli_fini(&c);
 }
 
 static void	refused_by(struct fixture *, const est_in *, const char *);
@@ -795,6 +796,9 @@ refused_by(struct fixture *f, const est_in *in, const char *why)
 	ATF_CHECK(c.open_error != 0);
 	ATF_CHECK_MATCH_MSG(why, c.open_text, "%s, not %s", c.open_text,
 	    why);
+	/* The refused stream's close comes on the I/O thread: c is not
+	 * let go before it. */
+	wait_for(&c.closed, 1, 2000);
 	cli_fini(&c);
 }
 

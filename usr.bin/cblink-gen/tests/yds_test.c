@@ -16,6 +16,8 @@
 
 #include <atf-c.h>
 #include <errno.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -34,14 +36,18 @@ static char kept_to_b[32];
 /* cfg as the handlers keep it. */
 static struct {
 	bool	 have;
-	int32_t	 a;
+	atomic_int a;	/* read by the cases as a rollback may write it */
 	char	 b[32];
-	uint32_t hits;
-	int	 undo_fails;	/* how often an undo failed */
+	/* Atomic: a read and a rollback's run on threads of their own. */
+	atomic_uint hits;
+	atomic_int undo_fails;	/* how often an undo failed */
 	int	 edits;		/* how often the handler was asked */
 	int	 level;		/* reported as set; 0: not reported */
 	bool	 learned;	/* c in the operational state alone */
 } kept;
+/* kept's lock: a read, an edit and a rollback run on threads of their
+ * own, as the library serves requests. */
+static pthread_mutex_t kept_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static const struct cbl_ynode *
 top(const char *mod, const char *name)
@@ -77,17 +83,22 @@ cfg_get(cbl_req *req, void *data, cbl_yarena *a)
 	char *b;
 
 	kept.hits++;
-	if (!kept.have)
+	pthread_mutex_lock(&kept_mtx);
+	if (!kept.have) {
+		pthread_mutex_unlock(&kept_mtx);
 		return (0);
+	}
 	if ((c = cbl_yarena_alloc(a, sizeof(*c))) == NULL ||
-	    (b = cbl_yarena_alloc(a, sizeof(kept.b))) == NULL)
+	    (b = cbl_yarena_alloc(a, sizeof(kept.b))) == NULL) {
+		pthread_mutex_unlock(&kept_mtx);
 		return (ENOMEM);
+	}
 	memcpy(b, kept.b, sizeof(kept.b));
 	c->has_a = true;
 	c->a = kept.a;
 	c->b = b[0] != '\0' ? b : NULL;
 	c->has_hits = true;
-	c->hits = kept.hits;
+	c->hits = atomic_load(&kept.hits);
 	if (kept.level != 0) {
 		c->has_level = true;
 		c->level = (uint8_t)kept.level;
@@ -95,6 +106,7 @@ cfg_get(cbl_req *req, void *data, cbl_yarena *a)
 	if (kept.learned &&
 	    cbl_req_ydatastore(req) == CBL_YDS_OPERATIONAL)
 		c->c = "learned";
+	pthread_mutex_unlock(&kept_mtx);
 	d->cfg = c;
 	return (0);
 }
@@ -108,7 +120,9 @@ cfg_edit(cbl_req *req, const void *before, const void *after)
 {
 	const struct dsdemo *b = before, *x = after;
 
+	pthread_mutex_lock(&kept_mtx);
 	kept.edits++;
+	pthread_mutex_unlock(&kept_mtx);
 	if (x->cfg != NULL && x->cfg->has_a && x->cfg->a == 13 &&
 	    !cbl_req_yaccepts(req, "thirteen")) {
 		(void)cbl_req_set_yapptag(req, "thirteen");
@@ -119,11 +133,13 @@ cfg_edit(cbl_req *req, const void *before, const void *after)
 	if (b->cfg != NULL && b->cfg->has_a && b->cfg->a == 99 &&
 	    x->cfg != NULL && x->cfg->a != 99)
 		return (EIO);
+	pthread_mutex_lock(&kept_mtx);
 	kept.have = x->cfg != NULL;
 	kept.a = x->cfg != NULL && x->cfg->has_a ? x->cfg->a : 0;
 	(void)strlcpy(kept.b, x->cfg != NULL && x->cfg->b != NULL ? x->cfg->b :
 	    "", sizeof(kept.b));
-	if (kept.a == 7)
+	pthread_mutex_unlock(&kept_mtx);
+	if (x->cfg != NULL && x->cfg->has_a && x->cfg->a == 7)
 		(void)cbl_req_ywarn(req, n_cfg->sid, "seven",
 		    "7 takes effect after a reboot");
 	return (0);
