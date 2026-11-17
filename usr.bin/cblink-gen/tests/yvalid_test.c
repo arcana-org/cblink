@@ -13,7 +13,10 @@
 
 #include <atf-c.h>
 #include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "rules.h"
 
@@ -302,6 +305,81 @@ ATF_TC_BODY(keys_unique, tc)
 	refused(&r, 0, "name", "missing-element", NULL);
 }
 
+/* CPU seconds this process has used. */
+static double
+cpu_seconds(void)
+{
+	struct timespec ts;
+
+	ATF_REQUIRE(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0);
+	return ((double)ts.tv_sec + (double)ts.tv_nsec / 1e9);
+}
+
+/*
+ * Long lists: keys, unique and a leaf-list's values each once, found
+ * by hashing, not entry against entry.  200000 entries compared each
+ * with every other would take minutes; hashed, a fraction of a second.
+ * The one entry alike is the last, so every other is looked at first.
+ */
+#define	LONG	200000
+ATF_TC_WITHOUT_HEAD(long_lists);
+ATF_TC_BODY(long_lists, tc)
+{
+	struct rules_rules_server_addr *addr;
+	struct rules_rules_server *s;
+	struct rules_rules_defaults d;
+	struct rules_rules r;
+	char (*names)[16], (*ips)[16];
+	const char **dns;
+	double t0;
+
+	ATF_REQUIRE((s = calloc(LONG, sizeof(*s))) != NULL);
+	ATF_REQUIRE((addr = calloc(LONG, sizeof(*addr))) != NULL);
+	ATF_REQUIRE((names = calloc(LONG, sizeof(*names))) != NULL);
+	ATF_REQUIRE((ips = calloc(LONG, sizeof(*ips))) != NULL);
+	ATF_REQUIRE((dns = calloc(LONG, sizeof(*dns))) != NULL);
+	for (size_t i = 0; i < LONG; i++) {
+		snprintf(names[i], sizeof(names[i]), "s%zu", i);
+		snprintf(ips[i], sizeof(ips[i]), "10.%zu.%zu.%zu",
+		    i >> 16, (i >> 8) & 0xff, i & 0xff);
+		addr[i].ip = ips[i];
+		addr[i].has_port = true;
+		addr[i].port = 80;
+		s[i].name = names[i];
+		s[i].addr = &addr[i];
+		dns[i] = names[i];
+	}
+	valid(&r);
+	memset(&d, 0, sizeof(d));
+	r.defaults = &d;
+	r.server.n = LONG;
+	r.server.v = s;
+	d.dns.n = LONG;
+	d.dns.v = dns;
+	t0 = cpu_seconds();
+	accepted(&r, 0);
+	/* The last entry's key the first's. */
+	s[LONG - 1].name = names[0];
+	refused(&r, 0, "server", "data-exists", NULL);
+	s[LONG - 1].name = names[LONG - 1];
+	/* Its address the first's. */
+	addr[LONG - 1].ip = ips[0];
+	refused(&r, 0, "server", "operation-failed", "data-not-unique");
+	/* Without its port: not all of the unique leaves, let be. */
+	addr[LONG - 1].has_port = false;
+	accepted(&r, 0);
+	/* The leaf-list's last value its first's. */
+	dns[LONG - 1] = names[0];
+	refused(&r, 0, "dns", "data-exists", NULL);
+	ATF_CHECK_MSG(cpu_seconds() - t0 < 10, "%.1f s of CPU",
+	    cpu_seconds() - t0);
+	free(dns);
+	free(ips);
+	free(names);
+	free(addr);
+	free(s);
+}
+
 /* config false: there in state, refused in an edit. */
 ATF_TC_WITHOUT_HEAD(config_false);
 ATF_TC_BODY(config_false, tc)
@@ -380,6 +458,7 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, mandatory_choice);
 	ATF_TP_ADD_TC(tp, counts);
 	ATF_TP_ADD_TC(tp, keys_unique);
+	ATF_TP_ADD_TC(tp, long_lists);
 	ATF_TP_ADD_TC(tp, config_false);
 	ATF_TP_ADD_TC(tp, defaults);
 	return (atf_no_error());

@@ -81,7 +81,8 @@ named with their modules as at the top, in the instance tree as the
 mount point's children. Its struct has `mounted` (`struct
 cbl_ymounts`), a module's data struct each, made and found by
 `cbl_ymount_data()` and `cbl_ymount_find()`; the validator, NACM's
-paths and the difference of two trees go inside. A mount point with
+paths and the difference of two trees go inside. A mounted node keyed
+twice is refused, as a child twice is. A mount point with
 nodes of its own beside is not generated.
 
 ## 4. Validation
@@ -101,6 +102,8 @@ program filled it, against what RFC 7950 says of it within the tree:
 | a configuration leaf-list's value twice | `data-exists` | |
 | a `config false` node in an edit | `invalid-value` | |
 
+Keys, `unique` leaves and a leaf-list's values are checked by their
+hashes, not entry against entry: a list of n entries costs n, not n².
 The error's message is the restriction's `error-message` when it has
 one. A non-presence container that is absent is there in effect: a
 mandatory node below it is missing, but for a case's (none is given)
@@ -189,7 +192,10 @@ make the ERE over `CBL_PAT_MAX_EXPANDED` (32768 bytes) once
 `regcomp(3)` has copied each counted atom as often as its count says:
 nested counts multiply. `\d`, `\p{L}`,
 `\p{Lu}`, `\p{Ll}` and `\p{Nd}` are FreeBSD's Unicode classes in
-`C.UTF-8`; `\p{N}` and `\w` are narrower than XSD's.
+`C.UTF-8`; `\p{N}` and `\w` are narrower than XSD's. Patterns are
+compiled once and matched in `C.UTF-8` whatever the program's locale,
+by the validator and by the JSON translator choosing a union's member
+alike.
 
 ## 6. The protocol
 

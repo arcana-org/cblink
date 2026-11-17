@@ -629,8 +629,10 @@ Limits on input are checked before memory is allocated for it.
 They include the largest frame
 .Pq Dv CBL_LIM_MAX_FRAME ,
 nesting depth, values per body, open streams per connection, the initial
-stream window, outstanding requests, connections, and handshake and
-idle timeouts.
+stream window, outstanding requests, connections, connections from one
+source address
+.Pq Dv CBL_LIM_MAX_CONNS_PER_SRC , No off unless set ,
+and handshake and idle timeouts.
 A server stops reading a peer whose replies pile up in its send queue,
 rather than dropping them; a peer that stays quiet is sent keepalive
 pings, and one that does not answer them is dropped after the idle

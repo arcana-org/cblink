@@ -80,6 +80,14 @@ module example-foomod {
     leaf where {
       type instance-identifier;
     }
+    leaf letter {
+      type union {
+        type string {
+          pattern '.';
+        }
+        type int8;
+      }
+    }
     leaf mixed {
       type union {
         type int8;

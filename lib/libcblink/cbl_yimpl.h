@@ -13,6 +13,7 @@
 #ifndef _CBL_YIMPL_H_
 #define	_CBL_YIMPL_H_
 
+#include <regex.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -26,6 +27,9 @@ int	cbl_yset_case(const struct cbl_ynode *n, void *p);
 /* Leaf or leaf-list n's k-th default into out, as its member is. */
 int	cbl_ydefault_parse(const struct cbl_ynode *n, uint16_t k, void *out,
 	    cbl_yarena *a);
+/* A schema table's pattern (its ERE), compiled once for the process, in
+ * C.UTF-8 as cbl_pattern_match() matches; NULL: it does not compile. */
+const regex_t *cbl_ypattern(const char *ere);
 
 
 

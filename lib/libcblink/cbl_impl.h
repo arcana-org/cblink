@@ -135,6 +135,16 @@ struct cbl_group {
 
 RB_HEAD(cbl_group_tree, cbl_group);
 
+/* The accepted connections from one source address, for
+ * max_conns_per_src (cbl_sock.c); IPv4 as IPv4-mapped IPv6. */
+struct cbl_srcconns {
+	RB_ENTRY(cbl_srcconns)	 link;
+	uint8_t			 addr[16];
+	uint32_t		 n;
+};
+
+RB_HEAD(cbl_src_tree, cbl_srcconns);
+
 struct cbl_member {
 	LIST_ENTRY(cbl_member)	 glink;		/* in the group */
 	LIST_ENTRY(cbl_member)	 clink;		/* in the connection */
@@ -198,6 +208,8 @@ struct cbl_ctx {
 	struct cbl_limits	 lim;
 	bool			 frozen;
 	atomic_uint		 nconns;	/* for max_conns */
+	pthread_mutex_t		 srcmtx;
+	struct cbl_src_tree	 srcs;		/* for max_conns_per_src */
 	atomic_uint		 nobjs;		/* loops, listeners, conns */
 	struct cbl_conn_cbs	 conn_cbs;
 	void			*conn_cbs_arg;
@@ -684,6 +696,12 @@ int	cbl_proxy_read(cbl_conn *conn);
 bool	cbl_proxy_allowed(const cbl_listener *l,
 	    const struct sockaddr_storage *ss);
 
+/* cbl_sock.c: conn counted against its source address's
+ * max_conns_per_src, 0 or ECONNREFUSED past it (conn->errstr says so);
+ * and its count let go. */
+int	cbl_src_count(cbl_conn *conn);
+void	cbl_src_uncount(cbl_conn *conn);
+
 /* Outgoing frame queue entry. */
 struct cbl_txent {
 	STAILQ_ENTRY(cbl_txent)	 link;
@@ -743,6 +761,7 @@ struct cbl_conn {
 	enum cbl_conn_state		 state;
 	bool				 initiator;
 	bool				 counted;	/* in ctx->nconns */
+	struct cbl_srcconns		*srcconns;	/* in ctx->srcs, or NULL */
 	atomic_bool			 dead;		/* detached from loop */
 	atomic_bool			 freeing;	/* freed by the app */
 	int				 fd;

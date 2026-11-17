@@ -129,6 +129,7 @@ cbl_conn_rele(cbl_conn *conn)
 		conn->ops->free(conn);
 	if (conn->counted)
 		atomic_fetch_sub(&conn->ctx->nconns, 1);
+	cbl_src_uncount(conn);
 	atomic_fetch_sub(&conn->ctx->nobjs, 1);
 	free(conn->user);
 	pthread_cond_destroy(&conn->cv);
@@ -332,6 +333,10 @@ conn_handshake(cbl_conn *conn)
 		if ((error = cbl_proxy_read(conn)) != 0)
 			return (error);
 		conn->proxy_wait = false;
+		/* The client's address known only now. */
+		if ((conn->peer.flags & CBL_PEER_PROXIED) != 0 &&
+		    (error = cbl_src_count(conn)) != 0)
+			return (error);
 	}
 	return (conn->ops->handshake != NULL ? conn->ops->handshake(conn) : 0);
 }

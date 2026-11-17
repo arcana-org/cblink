@@ -111,7 +111,9 @@ data they receive.
 - **Resource limits.** Each limit is per context, listener or connection
   (WIRE-FORMAT.md section 11), and peers that exceed one get an error,
   not memory:
-  - connections (`max_conns`);
+  - connections (`max_conns`), and from one source address
+    (`max_conns_per_src`, off unless set; behind a PROXY listener the
+    client's address);
   - outstanding requests per connection (`max_inflight`);
   - queued output (`sendq_bytes`);
   - open streams (`max_streams`) and stream windows;

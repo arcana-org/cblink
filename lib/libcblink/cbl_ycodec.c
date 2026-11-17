@@ -1474,9 +1474,13 @@ dec_map(struct yrd *r, const struct cbl_ynode *n, void *p, int depth)
 					error = skip(r, depth);
 				continue;
 			}
+			/* Twice, as for a child of its own: refused, not
+			 * the first one's value lost to the second. */
 			if ((data = cbl_ymount_data(n, p, c->module,
 			    r->a)) == NULL)
 				error = fail(r, ENOMEM, NOMEM);
+			else if (present(c, data))
+				error = fail(r, EINVAL, "%s: twice", c->name);
 			else
 				error = dec_child(r, c, data, depth);
 			continue;

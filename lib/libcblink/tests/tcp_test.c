@@ -976,6 +976,39 @@ ATF_TC_BODY(listener_free_running, tc)
 	ATF_REQUIRE_EQ(0, cbl_ctx_free(ctx));
 }
 
+/*
+ * max_conns_per_src: a third connection from 127.0.0.1 is closed as
+ * soon as it is accepted, and one is taken again once one of the two
+ * has gone.  Off by default, and 0 turns it off.
+ */
+ATF_TC_WITHOUT_HEAD(conns_per_src);
+ATF_TC_BODY(conns_per_src, tc)
+{
+	struct test_server ts;
+	cbl_ctx *sctx = test_ctx();
+	uint64_t v;
+	int fd[4];
+
+	ATF_REQUIRE_EQ(0, cbl_ctx_get_limit(sctx, CBL_LIM_MAX_CONNS_PER_SRC,
+	    &v));
+	ATF_REQUIRE_EQ(0, v);
+	ATF_REQUIRE_EQ(EINVAL, cbl_ctx_set_limit(sctx,
+	    CBL_LIM_MAX_CONNS_PER_SRC, 1024 * 1024 + 1));
+	ATF_REQUIRE_EQ(0, cbl_ctx_set_limit(sctx, CBL_LIM_MAX_CONNS_PER_SRC,
+	    2));
+	test_server_start(&ts, sctx, "tcp://127.0.0.1:0", CBL_PLAINTEXT);
+	ATF_REQUIRE(raw_taken(sctx, ts.uri, NULL, 0, &fd[0]));
+	ATF_REQUIRE(raw_taken(sctx, ts.uri, NULL, 0, &fd[1]));
+	ATF_REQUIRE(!raw_taken(sctx, ts.uri, NULL, 0, &fd[2]));
+	close(fd[0]);
+	ATF_REQUIRE(raw_taken_soon(sctx, ts.uri, NULL, 0, &fd[2]));
+	ATF_REQUIRE(!raw_taken(sctx, ts.uri, NULL, 0, &fd[3]));
+	close(fd[1]);
+	close(fd[2]);
+	test_server_stop(&ts);
+	ATF_REQUIRE_EQ(0, cbl_ctx_free(sctx));
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -1001,5 +1034,6 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, ctx_busy);
 	ATF_TP_ADD_TC(tp, answer_flood);
 	ATF_TP_ADD_TC(tp, listener_free_running);
+	ATF_TP_ADD_TC(tp, conns_per_src);
 	return (atf_no_error());
 }

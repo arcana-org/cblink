@@ -193,4 +193,51 @@ raw_closed(int fd, int timeout_ms)
 	}
 }
 
+/*
+ * Whether the server at uri takes a connection that sends pre first (a
+ * PROXY header, say): a ping on it is answered.  Taken, *fdp is the
+ * connection, still open; not taken, it is closed.
+ */
+static inline bool
+raw_taken(cbl_ctx *ctx, const char *uri, const void *pre, size_t prelen,
+    int *fdp)
+{
+	unsigned char buf[1024];
+	cbl_msg *m;
+	size_t len;
+	int fd;
+
+	ATF_REQUIRE(prelen < sizeof(buf) - 64);
+	if (prelen > 0)
+		memcpy(buf, pre, prelen);
+	len = prelen + mkframe(buf + prelen, sizeof(buf) - prelen, 0, 4,
+	    CBL_F_REQUEST, 9, 0, "A0");
+	fd = raw_connect(uri);
+	/* Closed already, it may be: no SIGPIPE, what is read says. */
+	(void)send(fd, buf, len, MSG_NOSIGNAL);
+	if ((m = raw_read_msg(ctx, fd)) == NULL) {
+		close(fd);
+		return (false);
+	}
+	ATF_REQUIRE_EQ(0, cbl_msg_err_code(m));
+	cbl_msg_free(m);
+	*fdp = fd;
+	return (true);
+}
+
+/* raw_taken(), tried for up to two seconds: the server lets a closed
+ * connection's place go when it has seen it close. */
+static inline bool
+raw_taken_soon(cbl_ctx *ctx, const char *uri, const void *pre,
+    size_t prelen, int *fdp)
+{
+
+	for (int i = 0; i < 40; i++) {
+		if (raw_taken(ctx, uri, pre, prelen, fdp))
+			return (true);
+		usleep(50000);
+	}
+	return (false);
+}
+
 #endif /* !_CBL_NET_TEST_H_ */

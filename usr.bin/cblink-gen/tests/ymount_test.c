@@ -221,6 +221,39 @@ ATF_TC_BODY(absolute_key, tc)
 	cbl_yarena_free(a);
 }
 
+/* A mounted node keyed twice: refused, as a child of the node's own
+ * is, not the first one's value lost to the second. */
+ATF_TC_WITHOUT_HEAD(mounted_twice);
+ATF_TC_BODY(mounted_twice, tc)
+{
+	const struct cbl_ynode *n_data = top("mntdemo")->child[0]->child[0];
+	struct cbl_ybuf b = { NULL, 0, 0 };
+	struct mntdemo m;
+	struct mntdemo_hosts_host_data back;
+	uint8_t *twice;
+	cbl_yarena *a;
+	char why[160];
+
+	ATF_REQUIRE((a = cbl_yarena_new()) != NULL);
+	build(&m, a, DSDEMO_CFG_KIND_PLAIN);
+	ATF_REQUIRE_EQ(0, cbl_yencode(n_data, m.hosts->host.v[0].data, &b));
+	/* A map of one, the mounted cfg: once taken. */
+	ATF_REQUIRE(b.len > 1 && b.p[0] == 0xa1);
+	ATF_REQUIRE_EQ_MSG(0, cbl_ydecode(n_data, b.p, b.len, &back, a,
+	    CBL_YD_STRICT, why, sizeof(why)), "%s", why);
+	/* The same key and value again, a map of two: refused. */
+	ATF_REQUIRE((twice = malloc(2 * b.len - 1)) != NULL);
+	twice[0] = 0xa2;
+	memcpy(twice + 1, b.p + 1, b.len - 1);
+	memcpy(twice + b.len, b.p + 1, b.len - 1);
+	ATF_CHECK_EQ(EINVAL, cbl_ydecode(n_data, twice, 2 * b.len - 1, &back,
+	    a, 0, why, sizeof(why)));
+	ATF_CHECK_MSG(strstr(why, "twice") != NULL, "%s", why);
+	free(twice);
+	cbl_ybuf_free(&b);
+	cbl_yarena_free(a);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -229,5 +262,6 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, tree);
 	ATF_TP_ADD_TC(tp, validate);
 	ATF_TP_ADD_TC(tp, absolute_key);
+	ATF_TP_ADD_TC(tp, mounted_twice);
 	return (atf_no_error());
 }

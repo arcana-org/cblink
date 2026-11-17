@@ -87,6 +87,11 @@
       },
       {
         "namespace": "data",
+        "identifier": "/example-foomod:top/letter",
+        "sid": "99021"
+      },
+      {
+        "namespace": "data",
         "identifier": "/example-foomod:top/mixed",
         "sid": "99015"
       },

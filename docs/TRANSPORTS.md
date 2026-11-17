@@ -218,6 +218,8 @@ client's, have the proxy send a PROXY protocol header (nginx
   address and port, and `cbl_peer_flags()` includes `CBL_PEER_PROXIED`.
   A `LOCAL` header (version 2, used for health checks), `UNKNOWN`
   (version 1) or any other address family keeps the proxy's address.
+- `max_conns_per_src` counts the client's address, once the header has
+  given it; a header that keeps the proxy's address is not counted.
 - Only the addresses are used. TLVs, including the TLS details some proxies
   add, are ignored: identity comes from the end-to-end mTLS.
 - A version 2 header may be at most 536 bytes. The header counts against

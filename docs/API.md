@@ -106,6 +106,7 @@ enum cbl_limit {
 	CBL_LIM_MAX_INFLIGHT, CBL_LIM_SENDQ_BYTES, CBL_LIM_MAX_CONNS,
 	CBL_LIM_HANDSHAKE_MS, CBL_LIM_IDLE_MS, CBL_LIM_STREAM_CLOSE_MS,
 	CBL_LIM_REQUEST_MS,		/* default sync request timeout */
+	CBL_LIM_MAX_CONNS_PER_SRC,	/* accepted from one address; 0: any */
 };
 int	cbl_ctx_set_limit(cbl_ctx *, enum cbl_limit, uint64_t);	/* EINVAL out of range */
 int	cbl_ctx_get_limit(const cbl_ctx *, enum cbl_limit, uint64_t *);

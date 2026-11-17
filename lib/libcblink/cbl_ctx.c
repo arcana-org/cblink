@@ -31,6 +31,7 @@ static const struct {
 	[CBL_LIM_IDLE_MS] =		{ 300000, 0, UINT32_MAX },
 	[CBL_LIM_STREAM_CLOSE_MS] =	{ 10000, 1, 3600000 },
 	[CBL_LIM_REQUEST_MS] =		{ 30000, 1, UINT32_MAX },
+	[CBL_LIM_MAX_CONNS_PER_SRC] =	{ 0, 0, 1024 * 1024 },
 };
 
 void
@@ -82,12 +83,14 @@ cbl_ctx_new(cbl_ctx **ctxp)
 	}
 	pthread_cond_init(&ctx->famcv, NULL);
 	pthread_mutex_init(&ctx->submtx, NULL);
+	pthread_mutex_init(&ctx->srcmtx, NULL);
 	pthread_mutex_init(&ctx->ysublock, NULL);
 	pthread_mutex_init(&ctx->nacmlock, NULL);
 	TAILQ_INIT(&ctx->ysubs);
 	TAILQ_INIT(&ctx->ycsubs);
 	pthread_cond_init(&ctx->ycv, NULL);
 	RB_INIT(&ctx->groups);
+	RB_INIT(&ctx->srcs);
 	RB_INIT(&ctx->fams);
 	ctx->next_fam = 2;	/* 0 and 1 are built in: ctrl, cblink.yang */
 	ctx->next_group = CBL_CTRL_GROUP_NOTIFY + 1;
@@ -124,6 +127,7 @@ cbl_ctx_free(cbl_ctx *ctx)
 	pthread_cond_destroy(&ctx->ycv);
 	pthread_mutex_destroy(&ctx->ysublock);
 	pthread_mutex_destroy(&ctx->submtx);
+	pthread_mutex_destroy(&ctx->srcmtx);
 	pthread_cond_destroy(&ctx->famcv);
 	pthread_rwlock_destroy(&ctx->famlock);
 	pthread_mutex_destroy(&ctx->mtx);

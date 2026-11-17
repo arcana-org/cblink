@@ -16,6 +16,7 @@
 
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <arpa/inet.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -887,6 +888,94 @@ cbl_listener_start(cbl_listener *l, cbl_loop *loop)
 	return (0);
 }
 
+/*
+ * Connections from one source address, max_conns_per_src of them at
+ * most (0: no limit), so that one peer cannot take all of max_conns.
+ * An address is an IPv4 one or a whole IPv6 one; local sockets are not
+ * counted.
+ */
+static int
+src_cmp(const struct cbl_srcconns *a, const struct cbl_srcconns *b)
+{
+
+	return (memcmp(a->addr, b->addr, sizeof(a->addr)));
+}
+
+RB_GENERATE_STATIC(cbl_src_tree, cbl_srcconns, link, src_cmp);
+
+/* conn's source as a key: false when it has none counted. */
+static bool
+src_key(const cbl_conn *conn, uint8_t addr[16])
+{
+	const struct sockaddr_storage *ss = &conn->peer.addr;
+
+	switch (ss->ss_family) {
+	case AF_INET:
+		memset(addr, 0, 10);
+		addr[10] = addr[11] = 0xff;
+		memcpy(addr + 12,
+		    &((const struct sockaddr_in *)(const void *)ss)->sin_addr, 4);
+		return (true);
+	case AF_INET6:
+		memcpy(addr,
+		    &((const struct sockaddr_in6 *)(const void *)ss)->sin6_addr,
+		    16);
+		return (true);
+	default:
+		return (false);
+	}
+}
+
+int
+cbl_src_count(cbl_conn *conn)
+{
+	struct cbl_srcconns key, *e;
+	cbl_ctx *ctx = conn->ctx;
+	uint64_t max = conn->lim.v[CBL_LIM_MAX_CONNS_PER_SRC];
+	char host[INET6_ADDRSTRLEN];
+
+	if (max == 0 || conn->srcconns != NULL || !src_key(conn, key.addr))
+		return (0);
+	pthread_mutex_lock(&ctx->srcmtx);
+	if ((e = RB_FIND(cbl_src_tree, &ctx->srcs, &key)) == NULL) {
+		if ((e = calloc(1, sizeof(*e))) == NULL) {
+			pthread_mutex_unlock(&ctx->srcmtx);
+			return (cbl_conn_seterr(conn, ENOMEM, "%s",
+			    strerror(ENOMEM)));
+		}
+		memcpy(e->addr, key.addr, sizeof(e->addr));
+		RB_INSERT(cbl_src_tree, &ctx->srcs, e);
+	}
+	if (e->n >= max) {
+		pthread_mutex_unlock(&ctx->srcmtx);
+		if (inet_ntop(AF_INET6, key.addr, host, sizeof(host)) == NULL)
+			strlcpy(host, "?", sizeof(host));
+		return (cbl_conn_seterr(conn, ECONNREFUSED, "%s: more than "
+		    "%ju connections from it", host, (uintmax_t)max));
+	}
+	e->n++;
+	conn->srcconns = e;
+	pthread_mutex_unlock(&ctx->srcmtx);
+	return (0);
+}
+
+void
+cbl_src_uncount(cbl_conn *conn)
+{
+	cbl_ctx *ctx = conn->ctx;
+	struct cbl_srcconns *e;
+
+	if ((e = conn->srcconns) == NULL)
+		return;
+	conn->srcconns = NULL;
+	pthread_mutex_lock(&ctx->srcmtx);
+	if (--e->n == 0) {
+		RB_REMOVE(cbl_src_tree, &ctx->srcs, e);
+		free(e);
+	}
+	pthread_mutex_unlock(&ctx->srcmtx);
+}
+
 /* Accept one connection; EAGAIN when none is pending. */
 static int
 listener_accept(cbl_listener *l, cbl_conn **connp)
@@ -935,8 +1024,13 @@ listener_accept(cbl_listener *l, cbl_conn **connp)
 			conn->peer.flags |= CBL_PEER_AUTHENTICATED;
 	}
 	peer_set_addr(conn, (struct sockaddr *)&ss, sslen);
-	/* The proxy's header comes before anything else, TLS included. */
+	/* The proxy's header comes before anything else, TLS included;
+	 * the source is counted once it has said which it is. */
 	conn->proxy_wait = (l->flags & CBL_LF_PROXY) != 0;
+	if (!conn->proxy_wait && cbl_src_count(conn) != 0) {
+		cbl_conn_rele(conn);
+		return (EAGAIN);
+	}
 	if (l->uri.transport == CBL_TR_SCTP && !l->use_tls &&
 	    (error = cbl_sctp_attach(conn)) != 0) {
 		cbl_conn_rele(conn);

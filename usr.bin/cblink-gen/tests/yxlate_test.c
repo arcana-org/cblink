@@ -232,6 +232,12 @@ ATF_TC_BODY(rfc7951, tc)
 	    CBL_ALL);
 	both_ways(s, "{\"example-foomod:top\":{\"mixed\":"
 	    "\"example-foomod:cat\"}}", CBL_ALL);
+	/* A string member's pattern matched in C.UTF-8, whatever the
+	 * program's locale (C here): one character, two bytes. */
+	both_ways(s, "{\"example-foomod:top\":{\"letter\":\"\xc3\xa9\"}}",
+	    CBL_ALL);
+	refused(s, "{\"example-foomod:top\":{\"letter\":\"ab\"}}",
+	    "invalid-value");
 	/* 6.11: an instance-identifier, which cblink's JSON has as null. */
 	both_ways(s, "{\"example-foomod:top\":{\"where\":"
 	    "\"/example-foomod:top/item[name='a']/count\"}}", CBL_JSON);

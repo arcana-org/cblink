@@ -22,7 +22,7 @@
 
 #define	CBLINK_VERSION_MAJOR	0
 #define	CBLINK_VERSION_MINOR	2
-#define	CBLINK_VERSION_PATCH	27
+#define	CBLINK_VERSION_PATCH	28
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,6 +87,7 @@ enum cbl_limit {
 	CBL_LIM_IDLE_MS,
 	CBL_LIM_STREAM_CLOSE_MS,
 	CBL_LIM_REQUEST_MS,
+	CBL_LIM_MAX_CONNS_PER_SRC,
 	CBL_LIM__COUNT
 };
 

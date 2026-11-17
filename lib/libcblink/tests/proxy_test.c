@@ -390,6 +390,43 @@ ATF_TC_BODY(allowed_proxies, tc)
 	proxy_server_stop(&ts);
 }
 
+/*
+ * max_conns_per_src behind a proxy: counted by the address its header
+ * gives, not the proxy's; a header without one (LOCAL, a health check)
+ * is not counted.
+ */
+ATF_TC_WITHOUT_HEAD(conns_per_src);
+ATF_TC_BODY(conns_per_src, tc)
+{
+	static const char from7[] =
+	    "PROXY TCP4 192.0.2.7 127.0.0.1 4321 8080\r\n";
+	static const char from8[] =
+	    "PROXY TCP4 192.0.2.8 127.0.0.1 4321 8080\r\n";
+	struct test_server ts;
+	unsigned char local[64];
+	size_t llen;
+	cbl_ctx *ctx = test_ctx();
+	int fd[6];
+
+	ATF_REQUIRE_EQ(0, cbl_ctx_set_limit(ctx, CBL_LIM_MAX_CONNS_PER_SRC,
+	    1));
+	test_server_start(&ts, ctx, "tcp://127.0.0.1:0",
+	    CBL_PLAINTEXT | CBL_LF_PROXY);
+	llen = pp2(local, 0, 0x00, NULL, 0, 0);
+	ATF_REQUIRE(raw_taken(ctx, ts.uri, from7, strlen(from7), &fd[0]));
+	ATF_REQUIRE(raw_taken(ctx, ts.uri, from8, strlen(from8), &fd[1]));
+	ATF_REQUIRE(!raw_taken(ctx, ts.uri, from7, strlen(from7), &fd[2]));
+	ATF_REQUIRE(raw_taken(ctx, ts.uri, local, llen, &fd[2]));
+	ATF_REQUIRE(raw_taken(ctx, ts.uri, local, llen, &fd[3]));
+	close(fd[0]);
+	ATF_REQUIRE(raw_taken_soon(ctx, ts.uri, from7, strlen(from7),
+	    &fd[4]));
+	ATF_REQUIRE(!raw_taken(ctx, ts.uri, from8, strlen(from8), &fd[5]));
+	for (int i = 1; i < 5; i++)
+		close(fd[i]);
+	proxy_server_stop(&ts);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
@@ -400,5 +437,6 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, timeout);
 	ATF_TP_ADD_TC(tp, flags);
 	ATF_TP_ADD_TC(tp, allowed_proxies);
+	ATF_TP_ADD_TC(tp, conns_per_src);
 	return (atf_no_error());
 }

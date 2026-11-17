@@ -19,6 +19,8 @@
  * an instance-identifier's, is the evaluator's (cbl_xpath).
  */
 
+#include <sys/param.h>
+
 #include <errno.h>
 #include <pthread.h>
 #include <regex.h>
@@ -151,7 +153,8 @@ has(const struct cbl_ynode *n, const void *p)
  * Patterns: each table's ERE compiled once, kept for the process; the
  * tables are static, so their strings' addresses are their keys.  Each
  * on its own allocation: another thread's growing the list moves the
- * list, not a regex_t one is matching with.
+ * list, not a regex_t one is matching with.  Compiled and matched in
+ * C.UTF-8 (cbl_pattern.c), whatever the program's locale.
  */
 static pthread_mutex_t	pat_mtx = PTHREAD_MUTEX_INITIALIZER;
 static struct pat {
@@ -161,8 +164,8 @@ static struct pat {
 }			**pats;
 static size_t		 npats;
 
-static const regex_t *
-pattern(const char *ere)
+const regex_t *
+cbl_ypattern(const char *ere)
 {
 	const regex_t *re = NULL;
 	struct pat *p;
@@ -282,7 +285,7 @@ v_value(struct yv *v, const struct cbl_ynode *n, const struct cbl_ytype *t,
 			    n->name, (intmax_t)len));
 		for (uint16_t k = 0; k < t->npatterns; k++) {
 			const struct cbl_ypattern *pt = &t->patterns[k];
-			const regex_t *re = pattern(pt->ere);
+			const regex_t *re = cbl_ypattern(pt->ere);
 
 			if (re == NULL)
 				return (vfail(v, n, "operation-failed", NULL,
@@ -413,6 +416,133 @@ same(const struct cbl_ytype *t, const void *a, const void *b)
 	}
 }
 
+/*
+ * Entries alike, found by their hashes rather than each against every
+ * other: a list of n entries costs n, not n squared, which a peer's
+ * EDIT of a long list would otherwise make it.  Open addressing at most
+ * half full; the hash is FNV-1a from a seed of the process's own, so a
+ * peer cannot pick entries that collide.  Same values hash the same as
+ * same() compares them.
+ */
+struct yslot {
+	uint64_t	h;
+	size_t		i;	/* the entry's index + 1; 0: empty */
+};
+
+#define	YSLOTS_SMALL	32	/* on the stack, for short lists */
+
+static pthread_once_t	seed_once = PTHREAD_ONCE_INIT;
+static uint64_t		seed;
+
+static void
+seed_init(void)
+{
+
+	arc4random_buf(&seed, sizeof(seed));
+	seed |= 1;
+}
+
+static uint64_t
+hmix(uint64_t h, const void *p, size_t len)
+{
+	const uint8_t *b = p;
+
+	for (size_t i = 0; i < len; i++) {
+		h ^= b[i];
+		h *= UINT64_C(0x100000001b3);
+	}
+	return (h);
+}
+
+/* Value a of type t mixed into h: what same() finds the same, alike. */
+static uint64_t
+hvalue(uint64_t h, const struct cbl_ytype *t, const void *a)
+{
+	const struct cbl_bytes *x;
+	const char *s;
+	unsigned i;
+	int e;
+
+	switch (t->kind) {
+	case CBL_YT_STRING:
+		s = *(const char *const *)a;
+		if (s == NULL)
+			s = "";
+		return (hmix(h, s, strlen(s) + 1));
+	case CBL_YT_BINARY:
+	case CBL_YT_BITS:
+	case CBL_YT_INSTANCEID:
+		x = a;
+		h = hmix(h, &x->len, sizeof(x->len));
+		return (x->len > 0 ? hmix(h, x->p, x->len) : h);
+	case CBL_YT_UNION:
+		i = *(const unsigned *)a;
+		h = hmix(h, &i, sizeof(i));
+		return (i < t->nmembers ? hvalue(h, t->members[i],
+		    AT(a, t->voff)) : h);
+	case CBL_YT_ENUMERATION:
+		e = read_enum(a, t->csize);
+		return (hmix(h, &e, sizeof(e)));
+	default:
+		return (hmix(h, a, t->csize));
+	}
+}
+
+/*
+ * Tables of slots for n entries each, ntab of them, from small (of
+ * nsmall slots) when they fit; *cap each one's slots, a power of two.
+ */
+static int
+tabs_alloc(size_t n, size_t ntab, struct yslot *small, size_t nsmall,
+    struct yslot **tab, size_t *cap)
+{
+	size_t c = 8;
+
+	pthread_once(&seed_once, seed_init);
+	while (c < n * 2) {
+		if (c > SIZE_MAX / 2)
+			return (ENOMEM);
+		c *= 2;
+	}
+	if (ntab > SIZE_MAX / sizeof(**tab) / c)
+		return (ENOMEM);
+	*cap = c;
+	if (c * ntab <= nsmall) {
+		memset(small, 0, c * ntab * sizeof(*small));
+		*tab = small;
+		return (0);
+	}
+	if ((*tab = calloc(c, ntab * sizeof(**tab))) == NULL)
+		return (ENOMEM);
+	return (0);
+}
+
+/* What tab_put() compares two entries with. */
+struct yalike {
+	const struct cbl_ynode		*n;
+	const struct cbl_yunique	*un;	/* NULL: the keys */
+	const struct yarr		*a;
+};
+
+/* Entry i, of hash h, put in tab (of mask + 1 slots): whether an
+ * earlier entry is there that alike() finds the same. */
+static bool
+tab_put(struct yslot *tab, size_t mask, uint64_t h, size_t i,
+    bool (*alike)(const struct yalike *, size_t, size_t),
+    const struct yalike *arg)
+{
+
+	for (size_t k = (size_t)h & mask;; k = (k + 1) & mask) {
+		if (tab[k].i == 0) {
+			tab[k].h = h;
+			tab[k].i = i + 1;
+			return (false);
+		}
+		if (tab[k].h == h && alike(arg, tab[k].i - 1, i))
+			return (true);
+	}
+}
+
 /* A unique leaf's value in an entry, or NULL: not there. */
 static const void *
 unique_leaf(const struct cbl_ynode *const *path, const void *entry)
@@ -429,6 +559,76 @@ unique_leaf(const struct cbl_ynode *const *path, const void *entry)
 	return (AT(p, (*path)->off));
 }
 
+/* The leaf at the end of a unique statement's path. */
+static const struct cbl_ynode *
+unique_end(const struct cbl_ynode *const *path)
+{
+
+	while (path[1] != NULL)
+		path++;
+	return (*path);
+}
+
+/* Entry e's hash of its keys (with keys), or of un's leaves: false when
+ * one of those is not there, which RFC 7950 section 7.8.3 lets be. */
+static bool
+entry_hash(const struct cbl_ynode *n, const struct cbl_yunique *un,
+    const void *e, uint64_t *h)
+{
+	const void *x;
+
+	*h = seed;
+	if (un == NULL) {
+		for (uint16_t k = 0; k < n->nkeys; k++) {
+			const struct cbl_ynode *kn = n->child[n->keys[k]];
+
+			*h = hvalue(*h, kn->type, AT(e, kn->off));
+		}
+		return (true);
+	}
+	for (uint16_t k = 0; k < un->n; k++) {
+		if ((x = unique_leaf(un->leaf[k], e)) == NULL)
+			return (false);
+		*h = hvalue(*h, unique_end(un->leaf[k])->type, x);
+	}
+	return (true);
+}
+
+static bool
+entries_alike(const struct yalike *l, size_t i, size_t j)
+{
+	const struct cbl_ynode *n = l->n;
+	const void *e = AT(l->a->v, i * n->size), *f = AT(l->a->v,
+	    j * n->size), *x, *y;
+
+	if (l->un == NULL) {
+		for (uint16_t k = 0; k < n->nkeys; k++) {
+			const struct cbl_ynode *kn = n->child[n->keys[k]];
+
+			if (!same(kn->type, AT(e, kn->off), AT(f, kn->off)))
+				return (false);
+		}
+		return (true);
+	}
+	for (uint16_t k = 0; k < l->un->n; k++) {
+		x = unique_leaf(l->un->leaf[k], e);
+		y = unique_leaf(l->un->leaf[k], f);
+		if (x == NULL || y == NULL ||
+		    !same(unique_end(l->un->leaf[k])->type, x, y))
+			return (false);
+	}
+	return (true);
+}
+
+static bool
+values_alike(const struct yalike *l, size_t i, size_t j)
+{
+	const struct cbl_ytype *t = l->n->type;
+
+	return (same(t, AT(l->a->v, i * t->csize), AT(l->a->v,
+	    j * t->csize)));
+}
+
 static int	v_mounted(struct yv *, const struct cbl_ynode *, const void *,
 		    int);
 static int	v_struct(struct yv *, const struct cbl_ynode *, const void *,
@@ -439,72 +639,61 @@ static int
 v_list(struct yv *v, const struct cbl_ynode *n, const struct yarr *a,
     int depth)
 {
-	int error;
+	struct yslot small[YSLOTS_SMALL], *tab = NULL;
+	struct yalike l = { n, NULL, a };
+	size_t cap = 0, ntab = (n->nkeys > 0) + n->nunique;
+	uint64_t h;
+	int error = 0;
 
-	for (size_t i = 0; i < a->n; i++) {
+	if (ntab > 0 && a->n > 1 && (error = tabs_alloc(a->n, ntab, small,
+	    nitems(small), &tab, &cap)) != 0)
+		return (error);
+	for (size_t i = 0; i < a->n && error == 0; i++) {
 		const void *e = AT(a->v, i * n->size);
+		struct yslot *t = tab;
 
 		for (uint16_t k = 0; k < n->nkeys; k++) {
 			const struct cbl_ynode *kn = n->child[n->keys[k]];
 
 			if (kn->type->kind == CBL_YT_STRING &&
-			    *(const char *const *)AT(e, kn->off) == NULL)
-				return (vfail(v, kn, "missing-element", NULL,
+			    *(const char *const *)AT(e, kn->off) == NULL) {
+				error = vfail(v, kn, "missing-element", NULL,
 				    NULL, "%s: an entry without its key %s",
-				    n->name, kn->name));
-		}
-		if ((error = v_struct(v, n, e, depth + 1)) != 0)
-			return (error);
-		/* Its keys, no other entry's. */
-		for (size_t j = 0; j < i && n->nkeys > 0; j++) {
-			const void *f = AT(a->v, j * n->size);
-			uint16_t k;
-
-			for (k = 0; k < n->nkeys; k++) {
-				const struct cbl_ynode *kn =
-				    n->child[n->keys[k]];
-
-				if (!same(kn->type, AT(e, kn->off),
-				    AT(f, kn->off)))
-					break;
+				    n->name, kn->name);
+				goto out;
 			}
-			if (k == n->nkeys)
-				return (vfail(v, n, "data-exists", NULL, NULL,
+		}
+		if ((error = v_struct(v, n, e, depth + 1)) != 0 || tab == NULL)
+			continue;
+		/* Its keys, no other entry's. */
+		l.un = NULL;
+		if (n->nkeys > 0) {
+			(void)entry_hash(n, NULL, e, &h);
+			if (tab_put(t, cap - 1, h, i, entries_alike, &l)) {
+				error = vfail(v, n, "data-exists", NULL, NULL,
 				    "%s: two entries of one key (%s)",
-				    n->name, n->child[n->keys[0]]->name));
+				    n->name, n->child[n->keys[0]]->name);
+				break;
+			}
+			t += cap;
 		}
 		/* RFC 7950 section 7.8.3: where all the leaves are. */
-		for (uint16_t u = 0; u < n->nunique; u++) {
-			const struct cbl_yunique *un = &n->unique[u];
-
-			for (size_t j = 0; j < i; j++) {
-				const void *f = AT(a->v, j * n->size);
-				uint16_t k;
-
-				for (k = 0; k < un->n; k++) {
-					const struct cbl_ynode *const *path =
-					    un->leaf[k];
-					const struct cbl_ynode *leaf;
-					const void *x, *y;
-
-					for (leaf = *path; path[1] != NULL;
-					    path++)
-						leaf = path[1];
-					x = unique_leaf(un->leaf[k], e);
-					y = unique_leaf(un->leaf[k], f);
-					if (x == NULL || y == NULL ||
-					    !same(leaf->type, x, y))
-						break;
-				}
-				if (k == un->n)
-					return (vfail(v, n, "operation-failed",
-					    "data-not-unique", NULL, "%s: two "
-					    "entries alike in what is unique",
-					    n->name));
+		for (uint16_t u = 0; u < n->nunique; u++, t += cap) {
+			l.un = &n->unique[u];
+			if (entry_hash(n, l.un, e, &h) &&
+			    tab_put(t, cap - 1, h, i, entries_alike, &l)) {
+				error = vfail(v, n, "operation-failed",
+				    "data-not-unique", NULL, "%s: two "
+				    "entries alike in what is unique",
+				    n->name);
+				break;
 			}
 		}
 	}
-	return (0);
+out:
+	if (tab != small)
+		free(tab);
+	return (error);
 }
 
 /* A leaf-list: each value, and each once when it is configuration. */
@@ -512,19 +701,30 @@ static int
 v_leaflist(struct yv *v, const struct cbl_ynode *n, const struct yarr *a)
 {
 	const struct cbl_ytype *t = n->type;
-	int error;
+	struct yslot small[YSLOTS_SMALL], *tab = NULL;
+	struct yalike l = { n, NULL, a };
+	size_t cap = 0;
+	int error = 0;
 
+	if ((n->flags & CBL_YNF_CONFIG) != 0 && a->n > 1 &&
+	    (error = tabs_alloc(a->n, 1, small, nitems(small), &tab,
+	    &cap)) != 0)
+		return (error);
 	for (size_t i = 0; i < a->n; i++) {
 		const void *x = AT(a->v, i * t->csize);
 
 		if ((error = v_value(v, n, t, x)) != 0)
-			return (error);
-		for (size_t j = 0; j < i && (n->flags & CBL_YNF_CONFIG); j++)
-			if (same(t, x, AT(a->v, j * t->csize)))
-				return (vfail(v, n, "data-exists", NULL, NULL,
-				    "%s: a value twice", n->name));
+			break;
+		if (tab != NULL && tab_put(tab, cap - 1, hvalue(seed, t, x),
+		    i, values_alike, &l)) {
+			error = vfail(v, n, "data-exists", NULL, NULL,
+			    "%s: a value twice", n->name);
+			break;
+		}
 	}
-	return (0);
+	if (tab != small)
+		free(tab);
+	return (error);
 }
 
 /* A count against min-elements and max-elements. */

@@ -51,6 +51,8 @@
 #include "cbl_schema.h"
 #include "cbl_yxlate.h"
 #include "cbl_json.h"
+#include "cbl_pattern.h"
+#include "cbl_yimpl.h"
 
 #define	DEPTH_MAX	64
 #define	IID_MAX		512
@@ -1094,8 +1096,8 @@ cbl_yxlate_json(const struct cbl_ysids *s, const void *cbor, size_t len,
 static bool
 string_ok(const struct cbl_ytype *t, const char *s)
 {
+	const regex_t *re;
 	size_t	n = 0;
-	regex_t	re;
 	bool	ok;
 
 	/* Its length in characters (RFC 7950 9.4.4). */
@@ -1109,13 +1111,12 @@ string_ok(const struct cbl_ytype *t, const char *s)
 		if (!ok)
 			return (false);
 	}
+	/* Compiled once, matched in C.UTF-8 as the validator does: a
+	 * union's member is not chosen by the program's locale. */
 	for (uint16_t i = 0; i < t->npatterns; i++) {
-		if (regcomp(&re, t->patterns[i].ere, REG_EXTENDED |
-		    REG_NOSUB) != 0)
+		if ((re = cbl_ypattern(t->patterns[i].ere)) == NULL)
 			return (false);
-		ok = regexec(&re, s, 0, NULL, 0) == 0;
-		regfree(&re);
-		if (ok == t->patterns[i].invert)
+		if (cbl_pattern_match(re, s) == t->patterns[i].invert)
 			return (false);
 	}
 	return (true);
