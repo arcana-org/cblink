@@ -505,7 +505,7 @@ loop_once(cbl_loop *loop, int timeout_ms)
 		switch (src->type) {
 		case CBL_SRC_CONN:
 			conn = src->obj;
-			if (conn->dead)
+			if (conn->dead || atomic_load(&conn->freeing))
 				break;
 			if (evs[i].filter == EVFILT_READ)
 				rev = CBL_EV_READ;

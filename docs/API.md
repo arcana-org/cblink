@@ -75,7 +75,8 @@ prototypes. For the protocol, see WIRE-FORMAT.md.
     `cbl_req_complete()` queue the message under the connection mutex and
     wake the loop through `EVFILT_USER`;
   - `cbl_conn_close()` and `cbl_conn_free()`, which hand the work to the
-    loop thread;
+    loop thread (once `cbl_conn_free()` returns, nothing more is
+    delivered on the connection, though its teardown runs later);
   - `cbl_stream_ref()`, `cbl_stream_rele()`, `cbl_req_cancelled()`,
     `cbl_conn_stats()`, `cbl_tls_reload()` and `cbl_listener_set_tls()`;
   - `cbl_notify()`;

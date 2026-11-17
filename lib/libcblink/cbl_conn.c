@@ -1365,7 +1365,12 @@ cbl_conn_free(cbl_conn *conn)
 	if (conn == NULL)
 		return;
 	if (!cbl_conn_io_thread(conn)) {
-		/* Let the loop thread tear it down. */
+		/*
+		 * Let the loop thread tear it down; until it does, its
+		 * events in the loop's batch are skipped, so nothing more
+		 * is delivered on a connection the application let go.
+		 */
+		atomic_store(&conn->freeing, true);
 		loop = cbl_conn_loop(conn);
 		if (loop != NULL &&
 		    cbl_loop_post(loop, conn_free_cb, conn) == 0)

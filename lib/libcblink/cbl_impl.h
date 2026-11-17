@@ -744,6 +744,7 @@ struct cbl_conn {
 	bool				 initiator;
 	bool				 counted;	/* in ctx->nconns */
 	atomic_bool			 dead;		/* detached from loop */
+	atomic_bool			 freeing;	/* freed by the app */
 	int				 fd;
 	int				 error;
 	char				 errstr[256];
