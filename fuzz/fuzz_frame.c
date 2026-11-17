@@ -26,14 +26,16 @@ int	LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
 static cbl_ctx *ctx;
 
-/* The decoder's tree: a tag is YANG-CBOR's or none. */
+/* The decoder's tree: a tag is YANG-CBOR's (109 the metadata
+ * draft's annotated value, since 0.2.15) or none. */
 static void
 walk(const cbl_attr *a, int depth)
 {
 
 	if (a == NULL || depth > 64)
 		return;
-	if (a->tag != 0 && a->tag != 4 && (a->tag < 43 || a->tag > 47))
+	if (a->tag != 0 && a->tag != 4 && (a->tag < 43 || a->tag > 47) &&
+	    a->tag != 109)
 		abort();
 	if (a->kind == CBL_K_NEST || a->kind == CBL_K_ARRAY)
 		for (uint32_t i = 0; i < a->count; i++)
