@@ -75,17 +75,34 @@ shapes_edit(cbl_req *req, const void *before, const void *after)
 	return (0);
 }
 
-/* /system: an edit with contact "fail" fails. */
+/* The child of n named name. */
+static const struct cbl_ynode *
+child_named(const struct cbl_ynode *n, const char *name)
+{
+
+	for (uint32_t i = 0; i < n->nchild; i++)
+		if (strcmp(n->child[i]->name, name) == 0)
+			return (n->child[i]);
+	atf_tc_fail("no %s in %s", name, n->name);
+}
+
+/* /system: an edit with contact "fail" fails; "refuse" is refused, the
+ * contact named as the node at fault. */
 static int
 system_edit(cbl_req *req, const void *before, const void *after)
 {
 	const struct ietf_system *s = after;
 
-	(void)req;
 	(void)before;
 	if (s->system != NULL && s->system->contact != NULL &&
 	    strcmp(s->system->contact, "fail") == 0)
 		return (EIO);
+	if (s->system != NULL && s->system->contact != NULL &&
+	    strcmp(s->system->contact, "refuse") == 0) {
+		(void)cbl_req_set_yerr(req, "no such contact",
+		    child_named(n_system, "contact")->sid);
+		return (EOPNOTSUPP);
+	}
 	return (0);
 }
 
@@ -358,6 +375,13 @@ ATF_TC_BODY(edit_rollback, tc)
 	ATF_REQUIRE_EQ(n_system->sid, cbl_msg_err_sid(r));
 	ATF_REQUIRE_STREQ("the edit failed: Input/output error",
 	    cbl_msg_err_str(r));
+	cbl_msg_free(r);
+	ATF_REQUIRE_EQ(100, get_ratio(&f));
+	/* Refused: the node the handler named, not the one it handles. */
+	ATF_REQUIRE_EQ(EOPNOTSUPP, edit(&f, 300, "refuse", &r));
+	ATF_REQUIRE_EQ(child_named(n_system, "contact")->sid,
+	    cbl_msg_err_sid(r));
+	ATF_REQUIRE_STREQ("no such contact", cbl_msg_err_str(r));
 	cbl_msg_free(r);
 	ATF_REQUIRE_EQ(100, get_ratio(&f));
 	teardown(&f);

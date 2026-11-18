@@ -136,7 +136,8 @@ cbl_ysay(cbl_req *req, int error, uint64_t sid, const char *tag,
 	return (error);
 }
 
-/* A handler's failure: the node, and its message if it gave none. */
+/* A handler's failure: the node, and its message if it gave none; a
+ * node it named itself (cbl_req_set_yerr()), one below sid, kept. */
 int
 cbl_yfailed(cbl_req *req, int error, uint64_t sid, const char *what)
 {
@@ -144,7 +145,8 @@ cbl_yfailed(cbl_req *req, int error, uint64_t sid, const char *what)
 
 	/* The handler's own word, or what failed and the errno's. */
 	if (req->err_msg != NULL)
-		return (cbl_ysay(req, error, sid, NULL, NULL));
+		return (cbl_ysay(req, error, req->err_ysid != 0 ?
+		    req->err_ysid : sid, req->err_ytag, NULL));
 	(void)snprintf(text, sizeof(text), "%s: %s", what, strerror(error));
 	return (cbl_ysay(req, error, sid, NULL, text));
 }
