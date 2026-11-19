@@ -80,6 +80,26 @@
         "namespace": "data",
         "identifier": "/dsdemo:refs/to-b",
         "sid": "82913"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/dsdemo:stats",
+        "sid": "82914"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/dsdemo:stats/reads",
+        "sid": "82915"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/dsdemo:status",
+        "sid": "82916"
+      },
+      {
+        "namespace": "data",
+        "identifier": "/dsdemo:status/up",
+        "sid": "82917"
       }
     ]
   }

@@ -101,6 +101,29 @@ module dsdemo {
     }
   }
 
+  container stats {
+    config false;
+    description
+      "State alone: not in running or the candidate, its handler not
+       run for them.";
+    leaf reads {
+      type uint32;
+      description
+        "How often its handler ran.";
+    }
+  }
+
+  container status {
+    description
+      "Config true, but all of it state: as stats.";
+    leaf up {
+      type boolean;
+      config false;
+      description
+        "State.";
+    }
+  }
+
   grouping tagging {
     description
       "What kind tagged needs.";

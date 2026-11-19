@@ -186,7 +186,42 @@ refs_edit(cbl_req *req, const void *before, const void *after)
 	return (0);
 }
 
-static struct cbl_yhandler handlers[2];
+/* How often stats's and status's handlers ran: state alone, not read
+ * for running or the candidate. */
+static atomic_uint stats_reads, status_reads;
+
+static int
+stats_get(cbl_req *req, void *data, cbl_yarena *a)
+{
+	struct dsdemo *d = data;
+	struct dsdemo_stats *s;
+
+	(void)req;
+	if ((s = cbl_yarena_alloc(a, sizeof(*s))) == NULL)
+		return (ENOMEM);
+	s->has_reads = true;
+	s->reads = ++stats_reads;
+	d->stats = s;
+	return (0);
+}
+
+static int
+status_get(cbl_req *req, void *data, cbl_yarena *a)
+{
+	struct dsdemo *d = data;
+	struct dsdemo_status *s;
+
+	(void)req;
+	status_reads++;
+	if ((s = cbl_yarena_alloc(a, sizeof(*s))) == NULL)
+		return (ENOMEM);
+	s->has_up = true;
+	s->up = true;
+	d->status = s;
+	return (0);
+}
+
+static struct cbl_yhandler handlers[4];
 static struct cbl_yserver server = { .schema = &ydsh_schema };
 
 struct fixture {
@@ -219,6 +254,11 @@ setup(struct fixture *f)
 	    NULL, NULL };
 	handlers[1] = (struct cbl_yhandler){ n_refs->sid, refs_get, refs_edit,
 	    NULL, NULL };
+	handlers[2] = (struct cbl_yhandler){ top("dsdemo", "stats")->sid,
+	    stats_get, NULL, NULL, NULL };
+	handlers[3] = (struct cbl_yhandler){ top("dsdemo", "status")->sid,
+	    status_get, NULL, NULL, NULL };
+	stats_reads = status_reads = 0;
 	kept_to_b[0] = '\0';
 	server.nhandler = nitems(handlers);
 	server.handler = handlers;
@@ -368,6 +408,79 @@ ATF_TC_BODY(candidate, tc)
 	ATF_REQUIRE_EQ(0, rpc0(&f, n_discard, NULL));
 	ATF_CHECK_EQ(5, get_a(&f, CBL_YDS_CANDIDATE, NULL));
 	ATF_CHECK_EQ(5, kept.a);
+	teardown(&f);
+}
+
+/* A GET of datastore ds (-1: none said) of the n nodes v (none: all of
+ * it); whether stats and status are in its answer. */
+static void
+get_state(struct fixture *f, int ds, const uint64_t *v, size_t n,
+    bool *stats, bool *status)
+{
+	struct dsdemo d = { 0 };
+	cbl_msg *m, *r;
+	cbl_yarena *a;
+
+	ATF_REQUIRE_EQ(0, cbl_msg_new(f->cctx, CBL_YANG_FAMILY, CBL_YCMD_GET,
+	    0, &m));
+	if (ds >= 0)
+		ATF_REQUIRE_EQ(0, cbl_msg_set_datastore(m,
+		    (enum cbl_yds_name)ds));
+	ATF_REQUIRE_EQ(0, cbl_msg_put_yget(m, v, n));
+	ATF_REQUIRE_EQ(0, cbl_request(f->c, m, &r, 5000));
+	ATF_REQUIRE((a = cbl_yarena_new()) != NULL);
+	*stats = cbl_msg_ydecode_member(r, top("dsdemo", "stats"), &d, a,
+	    CBL_YD_STRICT, NULL, 0) == 0 && d.stats != NULL;
+	*status = cbl_msg_ydecode_member(r, top("dsdemo", "status"), &d, a,
+	    CBL_YD_STRICT, NULL, 0) == 0 && d.status != NULL &&
+	    d.status->has_up;
+	cbl_yarena_free(a);
+	cbl_msg_free(r);
+}
+
+/*
+ * Running and the candidate have no state (RFC 8342 section 5.1): a
+ * top-level config false node's handler, and that of a config true one
+ * all of whose nodes are state, not run for them, whole or named; the
+ * operational state's read runs both.  Nor does an edit and a commit.
+ */
+ATF_TC_WITHOUT_HEAD(running_no_state);
+ATF_TC_BODY(running_no_state, tc)
+{
+	uint64_t v[3];
+	struct fixture f;
+	bool stats, status;
+
+	setup(&f);
+	v[0] = n_cfg->sid;
+	v[1] = top("dsdemo", "stats")->sid;
+	v[2] = top("dsdemo", "status")->sid;
+	get_state(&f, CBL_YDS_RUNNING, NULL, 0, &stats, &status);
+	ATF_CHECK(!stats && !status);
+	get_state(&f, CBL_YDS_RUNNING, v, 3, &stats, &status);
+	ATF_CHECK(!stats && !status);
+	get_state(&f, CBL_YDS_RUNNING, &v[1], 2, &stats, &status);
+	ATF_CHECK(!stats && !status);
+	get_state(&f, CBL_YDS_CANDIDATE, NULL, 0, &stats, &status);
+	ATF_CHECK(!stats && !status);
+	ATF_REQUIRE_EQ(0, edit(&f, f.c, CBL_YDS_CANDIDATE, 5));
+	get_state(&f, CBL_YDS_CANDIDATE, v, 3, &stats, &status);
+	ATF_CHECK(!stats && !status);
+	ATF_CHECK_EQ(5, get_a(&f, CBL_YDS_CANDIDATE, NULL));
+	ATF_REQUIRE_EQ(0, commit(&f, f.c, 0, NULL, NULL, NULL, NULL));
+	ATF_CHECK_EQ(5, get_a(&f, CBL_YDS_RUNNING, NULL));
+	ATF_CHECK_EQ(0, atomic_load(&stats_reads));
+	ATF_CHECK_EQ(0, atomic_load(&status_reads));
+
+	/* The operational state's: both read, whole and named. */
+	get_state(&f, CBL_YDS_OPERATIONAL, NULL, 0, &stats, &status);
+	ATF_CHECK(stats && status);
+	ATF_CHECK_EQ(1, atomic_load(&stats_reads));
+	ATF_CHECK_EQ(1, atomic_load(&status_reads));
+	get_state(&f, -1, &v[1], 2, &stats, &status);
+	ATF_CHECK(stats && status);
+	ATF_CHECK_EQ(2, atomic_load(&stats_reads));
+	ATF_CHECK_EQ(2, atomic_load(&status_reads));
 	teardown(&f);
 }
 
@@ -1012,5 +1125,6 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, running_conditions);
 	ATF_TP_ADD_TC(tp, running_preexisting);
 	ATF_TP_ADD_TC(tp, running_refs_warn);
+	ATF_TP_ADD_TC(tp, running_no_state);
 	return (atf_no_error());
 }

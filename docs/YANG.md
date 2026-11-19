@@ -289,7 +289,9 @@ section 5.2). An undo a handler fails
 is the program's to hear of, and the undo stops there; an undo needs
 no consent its commit had (`cbl_req_yundo()`). A get handler
 reading for running (`cbl_req_ydatastore()`) leaves out what is no
-configuration. With `CBL_YDS_CONFIRMED` running changes by
+configuration; a top-level node with none (`config false`, or all its
+nodes so) is not read for running or the candidate at all, its handler
+not run (RFC 8342 section 5.1), only for the operational state. With `CBL_YDS_CONFIRMED` running changes by
 a confirmed commit alone. With `CBL_YDS_REFS_WARN`, for a running that
 is a view of a live system (what a reference names may come later: an
 interface a service makes), a leafref or instance-identifier with

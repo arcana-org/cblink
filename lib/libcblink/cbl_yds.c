@@ -160,6 +160,41 @@ prune_state(cbl_dnode *n)
 	}
 }
 
+/*
+ * Whether schema node n can have instances in a conventional datastore,
+ * running or the candidate (RFC 8342 section 5.1: config false nodes are
+ * not there): config true with some configuration of its own, a leaf, a
+ * list (its keys), a presence container or a mount point, or a container
+ * with such a node below.  A config true container all of whose nodes
+ * are state has none: it is not read for them.
+ */
+static bool
+has_config(const struct cbl_ynode *n, int depth)
+{
+
+	if ((n->flags & CBL_YNF_CONFIG) == 0)
+		return (false);
+	switch (n->kind) {
+	case CBL_YN_LEAF:
+	case CBL_YN_LEAFLIST:
+	case CBL_YN_LIST:
+	case CBL_YN_ANYDATA:
+	case CBL_YN_ANYXML:
+		return (true);
+	case CBL_YN_CONTAINER:
+		/* Too deep to look: read, as before. */
+		if ((n->flags & (CBL_YNF_PRESENCE | CBL_YNF_MOUNT)) != 0 ||
+		    depth > 64)
+			return (true);
+		for (uint32_t i = 0; i < n->nchild; i++)
+			if (has_config(n->child[i], depth + 1))
+				return (true);
+		return (false);
+	default:
+		return (false);
+	}
+}
+
 /* The top-level configuration nodes the servers read and, with edit,
  * change; by SID. */
 static int
@@ -181,7 +216,7 @@ config_sids(cbl_ctx *ctx, bool edit, uint64_t **vp, size_t *np)
 			uint64_t *nv;
 
 			if (nd == NULL || !cbl_yis_top_data(nd) ||
-			    (nd->flags & CBL_YNF_CONFIG) == 0 ||
+			    !has_config(nd, 0) ||
 			    h->get == NULL || (edit && h->edit == NULL))
 				continue;
 			if (n == cap) {
@@ -593,13 +628,28 @@ cbl_yds_get(cbl_req *req, cbl_msg *reply, const uint64_t *v, size_t n,
 	if (t == NULL && ds == CBL_YDS_CANDIDATE && d->cand != NULL)
 		return (ENOMEM);
 	/* Running: the nodes asked for alone, read for it; all of it
-	 * where none is named. */
+	 * where none is named.  A node with no configuration is not read:
+	 * running has none of it (RFC 8342 section 5.1), and its handler,
+	 * often the slowest and the likeliest to fail, is not run for
+	 * nothing.  One no server has stays, to be refused. */
 	if (t == NULL && n > 0) {
 		bool was = req->yds_running;
+		uint64_t *cv;
+		size_t cn = 0;
 
+		if ((cv = calloc(n, sizeof(*cv))) == NULL)
+			return (ENOMEM);
+		for (size_t i = 0; i < n; i++) {
+			struct cbl_yfound f;
+
+			if (!cbl_yfind(req->conn->ctx, v[i], &f) ||
+			    !cbl_yis_top_data(f.n) || has_config(f.n, 0))
+				cv[cn++] = v[i];
+		}
 		req->yds_running = true;
-		error = cbl_yread_tree(req, v, n, &t, NULL);
+		error = cn > 0 ? cbl_yread_tree(req, cv, cn, &t, NULL) : 0;
 		req->yds_running = was;
+		free(cv);
 		if (error != 0)
 			return (error);
 		if (t == NULL) {
