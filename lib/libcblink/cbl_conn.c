@@ -687,6 +687,15 @@ conn_rx_frame(cbl_conn *conn, unsigned char *buf, size_t len)
 	struct cbl_hdr h;
 	int error;
 
+	/*
+	 * Let go by the application from another thread: the loop's batch
+	 * skips its events, but a read already under way when it was let
+	 * go goes on to the frames after; none of them is delivered.
+	 */
+	if (atomic_load(&conn->freeing)) {
+		free(buf);
+		return;
+	}
 	conn->last_rx = cbl_now_ms();
 	conn->open_deadline = 0;
 	error = cbl_msg_from_frame(&conn->lim, buf, len, &msg);
@@ -1372,7 +1381,8 @@ cbl_conn_free(cbl_conn *conn)
 	if (!cbl_conn_io_thread(conn)) {
 		/*
 		 * Let the loop thread tear it down; until it does, its
-		 * events in the loop's batch are skipped, so nothing more
+		 * events in the loop's batch are skipped and no frame read
+		 * meanwhile is delivered (conn_rx_frame()), so nothing more
 		 * is delivered on a connection the application let go.
 		 */
 		atomic_store(&conn->freeing, true);
