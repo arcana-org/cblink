@@ -262,6 +262,44 @@ ATF_TC_BODY(rfc7951, tc)
 	refused(s, "{\"example-foomod:top\":{\"price\":\"1.234\"}}",
 	    "invalid-value");
 	refused(s, "{\"example-foomod:top\":{\"on\":true}}", "invalid-value");
+	/* An instance-identifier names one instance: a keyed list's entry
+	 * by its keys, a leaf-list's by its value (fuzz_iid: the
+	 * translator took the list alone, which cbl_yiid_read() refuses). */
+	refused(s, "{\"example-foomod:top\":{\"where\":"
+	    "\"/example-foomod:top/item\"}}", "invalid-value");
+	refused(s, "{\"example-foomod:top\":{\"where\":"
+	    "\"/example-foomod:top/item/count\"}}", "invalid-value");
+	refused(s, "{\"example-foomod:top\":{\"where\":"
+	    "\"/example-foomod:top/item[name='a']/tag\"}}", "invalid-value");
+	refused(s, "{\"example-foomod:top\":{\"where\":"
+	    "\"/example-foomod:top/bars\"}}", "invalid-value");
+	{
+		struct cbl_ybuf b = { NULL, 0, 0 };
+		char why[256];
+
+		ATF_CHECK_EQ(EINVAL, cbl_yxlate_iid(s,
+		    "/example-foomod:top/item", &b, why, sizeof(why)));
+		ATF_CHECK(strstr(why, "without its keys") != NULL);
+		ATF_CHECK_EQ(EINVAL, cbl_yxlate_iid(s,
+		    "/example-foomod:top/bars", &b, why, sizeof(why)));
+		ATF_CHECK(strstr(why, "without its value") != NULL);
+		/* A key that is not UTF-8 (fuzz_iid): YANG-CBOR's text
+		 * strings are. */
+		ATF_CHECK_EQ(EINVAL, cbl_yxlate_iid(s,
+		    "/example-foomod:top/item[name='\xf4\xf4']/count", &b,
+		    why, sizeof(why)));
+		ATF_CHECK(strstr(why, "not UTF-8") != NULL);
+		ATF_CHECK_EQ(EINVAL, cbl_yxlate_iid(s,
+		    "/example-foomod:top/item[name='a']/tag[.='\xc0\xaf']",
+		    &b, why, sizeof(why)));
+		ATF_CHECK_EQ(0, cbl_yxlate_iid(s,
+		    "/example-foomod:top/item[name='\xc3\xa9']/count", &b,
+		    why, sizeof(why)));
+		ATF_CHECK_EQ(0, cbl_yxlate_iid(s,
+		    "/example-foomod:top/item[name='a']/count", &b, why,
+		    sizeof(why)));
+		cbl_ybuf_free(&b);
+	}
 	cbl_ysids_free(s);
 }
 

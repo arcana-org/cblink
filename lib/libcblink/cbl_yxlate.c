@@ -48,6 +48,7 @@
 #include <string.h>
 
 #include "cblink.h"
+#include "cbl_impl.h"
 #include "cbl_schema.h"
 #include "cbl_yxlate.h"
 #include "cbl_json.h"
@@ -1100,6 +1101,8 @@ string_ok(const struct cbl_ytype *t, const char *s)
 	size_t	n = 0;
 	bool	ok;
 
+	if (!cbl_utf8_valid((const unsigned char *)s, strlen(s)))
+		return (false);
 	/* Its length in characters (RFC 7950 9.4.4). */
 	for (const char *p = s; *p != '\0'; p++)
 		n += ((unsigned char)*p & 0xc0) != 0x80;
@@ -1273,6 +1276,12 @@ enc_text(struct xc *x, const struct cbl_ytype *t, const char *ctxmod,
 	case CBL_YT_EMPTY:
 		return (fail(x, "invalid-value", "empty is [null]"));
 	case CBL_YT_STRING:
+		/* JSON's strings are UTF-8 already (cbl_json.c); an
+		 * instance-identifier's key, cbl_yxlate_iid()'s, may not be,
+		 * and YANG-CBOR's text strings must (cbl_yiid_read()). */
+		if (!cbl_utf8_valid((const unsigned char *)s, strlen(s)))
+			return (fail(x, "invalid-value", "a string not "
+			    "UTF-8"));
 		if (inunion && !string_ok(t, s))
 			return (fail(x, "invalid-value", "'%s': not of its "
 			    "pattern or length", s));
@@ -1710,8 +1719,21 @@ iid_cbor(struct xc *x, const char *s)
 			nkv++;
 			p = e + 2;
 		}
-		if (error != 0 || nkv == 0)
+		if (error != 0)
 			continue;
+		/* A list's entry is named by all of its keys, a leaf-list's
+		 * by its value: the list or the leaf-list alone is no
+		 * instance (RFC 7950 section 9.13), and the reader refuses
+		 * it (cbl_yiid_read()). */
+		if (nkv == 0) {
+			if ((n = node_of(it)) != NULL &&
+			    ((n->kind == CBL_YN_LIST && n->nkeys > 0) ||
+			    n->kind == CBL_YN_LEAFLIST))
+				error = fail(x, "invalid-value", "'%s': %s "
+				    "without its %s", s, path,
+				    n->kind == CBL_YN_LIST ? "keys" : "value");
+			continue;
+		}
 		if ((n = node_of(it)) == NULL) {
 			error = fail(x, "invalid-value", "'%s': %s's keys are "
 			    "not known", s, path);

@@ -7,8 +7,9 @@
 #
 #	asan	AddressSanitizer and UndefinedBehaviorSanitizer
 #	tsan	ThreadSanitizer
-#	fuzz	fuzz_frame, fuzz_proxy, fuzz_ycodec, fuzz_xpath and
-#		fuzz_pattern, FUZZ_TIME seconds each (default 60)
+#	fuzz	fuzz_frame, fuzz_conn, fuzz_proxy, fuzz_ycodec,
+#		fuzz_yjson, fuzz_iid, fuzz_xpath and fuzz_pattern,
+#		FUZZ_TIME seconds each (default 60)
 #
 # The environment reaches make(1): CC, LD, CFLAGS and LDFLAGS are used
 # as given, with the sanitizer flags appended.  Everything is built and
@@ -138,7 +139,7 @@ run_fuzz()
 	fobj=$(make -C fuzz -V .OBJDIR)
 
 	failed=
-	for h in frame proxy ycodec xpath pattern; do
+	for h in frame conn proxy ycodec yjson iid xpath pattern; do
 		corpus=${work}/corpus/${h}
 		crashes=${work}/crashes/${h}
 		mkdir -p "${corpus}" "${crashes}"

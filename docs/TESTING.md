@@ -124,8 +124,11 @@ input. They are built with ASan and UBSan, and seeded from `fuzz/corpus/`:
 | Harness | Input |
 |---------|-------|
 | `fuzz_frame` | A frame: decoding, the decoder's tree, each top-level item found again at its bytes, and the YANG codec reading it as every control-family input and output, the hello and get structures, a notification, and its error. |
+| `fuzz_conn` | A byte stream on an accepted connection (a unix socketpair), read by the connection itself: the receive ring, frames split across reads or larger than it, bad headers skipped; each frame dispatched to the control family and to a family of an echo, a dump and an echoing stream, or taken as a reply or stream frame. |
 | `fuzz_proxy` | A PROXY protocol header, read from a socket: the reader must stop exactly at the end of the header. |
 | `fuzz_ycodec` | YANG-CBOR decoded into every struct of the test module `shapes` (every kind of node and type: tags 4 and 43 to 47, deltas from a node's and from an rpc's SID, unions, choices, lists), strictly and not; what decodes validated, encoded, decoded and encoded again to the same bytes, and likewise with its defaults. Its tables are committed (`fuzz/yshapes.*`, `make -C fuzz regen`; `ymod_regen` checks them). |
+| `fuzz_yjson` | JSON: the reader alone; RFC 7951 JSON of `shapes` made YANG-CBOR by the translator, as an object of top-level nodes and as one node's value, translated back and again to the same CBOR, and decoded as the node's struct; a `.sid` file in RFC 9595's JSON. |
+| `fuzz_iid` | Paths: an instance-identifier in YANG-CBOR (read, written, read again) and in XPath (made YANG-CBOR, which reads and writes again to the same bytes); a schema-node path; a NACM rule path, matched against a tree and the schema; a value from its canonical string. |
 | `fuzz_xpath` | An XPath expression: what parses is printed, and the print parses again to the same print; then it is evaluated over a tree of the shapes tables, every kind of leaf in it, from a node the first byte picks, its work bounded. |
 | `fuzz_pattern` | An XSD pattern: the translation to an ERE, compiled by regcomp(3). |
 
@@ -133,7 +136,10 @@ New inputs go to the first corpus directory given, so give a scratch one
 first to keep the committed seeds as they are:
 
 ```sh
-make -C fuzz
+make fuzz
 mkdir -p /tmp/corpus
-$(make -C fuzz -V .OBJDIR)/fuzz_frame -max_total_time=600 /tmp/corpus fuzz/corpus/frame
+obj/fuzz/fuzz_frame -max_total_time=600 /tmp/corpus fuzz/corpus/frame
 ```
+
+`fuzz/README` says more: each harness's corpus, options, and what to do
+with a crash.

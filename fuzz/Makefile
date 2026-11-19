@@ -1,32 +1,26 @@
-# libFuzzer harnesses for the parsers that see untrusted input: frames and
-# PROXY protocol headers from the network, YANG-CBOR into a module's
-# structs (fuzz_ycodec, by the committed tables of cblink-gen's test
-# module shapes: make regen), XPath and patterns.  Not part of
-# the normal build; the sources they test are compiled in, with coverage
-# instrumentation and ASan/UBSan:
-#
-#	make -C fuzz
-#	$(make -C fuzz -V .OBJDIR)/fuzz_frame -max_total_time=300 \
-#	    fuzz/corpus/frame
-#
-# (likewise fuzz_proxy with corpus/proxy, fuzz_ycodec with corpus/ycodec,
-# fuzz_xpath with corpus/xpath and fuzz_pattern with corpus/pattern; for
-# long runs of fuzz_xpath and fuzz_pattern, whose inputs are many and
-# small, ASAN_OPTIONS=quarantine_size_mb=16 keeps AddressSanitizer's
-# quarantine of freed memory from reaching the RSS limit).  To use more
-# CPUs, -jobs=N -workers=N: -fork=N was seen to hang on FreeBSD.
-# Point -artifact_prefix and a first, scratch corpus directory elsewhere to
-# keep new inputs out of the committed seeds.
+# libFuzzer harnesses for the parsers that see untrusted input: frames
+# alone (fuzz_frame) and as a connection's byte stream (fuzz_conn), PROXY
+# protocol headers, YANG-CBOR into a module's structs (fuzz_ycodec), RFC
+# 7951 JSON and .sid files (fuzz_yjson), instance-identifiers and the
+# other paths (fuzz_iid), XPath and patterns.  The YANG ones go by the
+# committed tables of cblink-gen's test module shapes (make regen).  Not
+# part of the normal build ("make fuzz" at the top builds them, in
+# obj/fuzz); the sources they test are compiled in, with coverage
+# instrumentation and ASan/UBSan.  README says how to run them.
 
 LIB=		${.CURDIR}/../lib/libcblink
 .PATH:		${LIB}
 
 LIBSRCS!=	cd ${LIB} && echo cbl_*.c
 
-PROGS=		fuzz_frame fuzz_proxy fuzz_ycodec fuzz_xpath fuzz_pattern
+PROGS=		fuzz_frame fuzz_conn fuzz_proxy fuzz_ycodec fuzz_yjson \
+		fuzz_iid fuzz_xpath fuzz_pattern
 SRCS.fuzz_frame=	fuzz_frame.c ${LIBSRCS}
+SRCS.fuzz_conn=	fuzz_conn.c ${LIBSRCS}
 SRCS.fuzz_proxy=	fuzz_proxy.c ${LIBSRCS}
 SRCS.fuzz_ycodec=	fuzz_ycodec.c yshapes_schema.c ${LIBSRCS}
+SRCS.fuzz_yjson=	fuzz_yjson.c yshapes_schema.c ${LIBSRCS}
+SRCS.fuzz_iid=	fuzz_iid.c yshapes_schema.c ${LIBSRCS}
 SRCS.fuzz_xpath=	fuzz_xpath.c yshapes_schema.c ${LIBSRCS}
 SRCS.fuzz_pattern=	fuzz_pattern.c cbl_pattern.c
 MAN=
@@ -40,8 +34,11 @@ CFLAGS+=	-g -O1 ${SANITIZE} -I${LIB} \
 LDFLAGS+=	${SANITIZE}
 LIBS_CBLINK=	${LOCALBASE}/lib/libcbor.so -lssl -lcrypto -lpthread
 LDADD.fuzz_frame=	${LIBS_CBLINK}
+LDADD.fuzz_conn=	${LIBS_CBLINK}
 LDADD.fuzz_proxy=	${LIBS_CBLINK}
 LDADD.fuzz_ycodec=	${LIBS_CBLINK}
+LDADD.fuzz_yjson=	${LIBS_CBLINK}
+LDADD.fuzz_iid=	${LIBS_CBLINK}
 LDADD.fuzz_xpath=	${LIBS_CBLINK}
 
 # The tables fuzz_ycodec decodes by, committed: the fuzzers are built

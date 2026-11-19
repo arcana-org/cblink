@@ -153,8 +153,9 @@ The suite has about 155 cases, using atf-c, atf-sh and kyua. It covers:
 - the examples.
 
 CI also runs the suite under ASan, UBSan and TSan, and runs the libFuzzer
-harnesses in `fuzz/` (frames, PROXY headers, XPath, patterns) for a
-minute each.
+harnesses in `fuzz/` (frames, a connection's byte stream, PROXY
+headers, YANG-CBOR, JSON, instance-identifiers, XPath, patterns) for a
+minute each; `make fuzz` builds them (fuzz/README).
 docs/TESTING.md has the details.
 
 ## Documentation

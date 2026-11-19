@@ -1,0 +1,95 @@
+cblink's libFuzzer harnesses
+============================
+
+The parsers that see what a peer or a person sends, each fuzzed with
+libFuzzer under AddressSanitizer and UndefinedBehaviorSanitizer (clang's
+-fsanitize=fuzzer,address,undefined; FreeBSD's base clang has them).  They
+are not part of the normal build.  From the top of the tree:
+
+	make fuzz
+
+builds every harness in obj/fuzz (make -C fuzz builds them in fuzz/
+itself).  The library's sources are compiled into each harness; the YANG
+harnesses decode by the committed tables of cblink-gen's test module
+shapes (yshapes.h, yshapes_schema.c: "make -C fuzz regen" remakes them
+with the cblink-gen built, and cblink_gen_test:ymod_regen fails when they
+differ).
+
+Harnesses and their seeds (corpus/<name>):
+
+  fuzz_frame	a frame as it arrives: decoded, its tree walked, its
+		top-level items found again, read as every control-family
+		message, a notification, a GET; its error.  Seeds: frames
+		of the control family and of the tests' families.
+  fuzz_conn	a byte stream on an accepted connection (unix socketpair,
+		integration mode): the receive ring, frames cut out of it,
+		each dispatched to the control family or to a family of an
+		echo (cmd 3), a dump (4) and an echoing stream (5), or taken
+		as a reply or a stream frame; EOF at the end.  Seeds: the
+		frame seeds, alone and after a hello, a whole session, and a
+		stream with data.  The family is the first registered: id 2.
+  fuzz_proxy	a PROXY protocol header (v1 and v2) read from a socket.
+  fuzz_ycodec	YANG-CBOR decoded into every struct of shapes, strictly
+		and not; what decodes validated and round-tripped, also
+		through the instance tree.  Seeds: every struct, filled.
+  fuzz_yjson	JSON: the reader (cbl_json.c); RFC 7951 JSON of shapes
+		into YANG-CBOR by the translator (cbl_yxlate.c), as an
+		object of top-level nodes and, after a first byte that picks
+		the node, as one node's value; back to JSON and into the
+		same CBOR; a .sid file (RFC 9595 JSON).  Seeds: the ycodec
+		seeds as JSON, a shapes container with every leaf, the
+		shapes .sid file.
+  fuzz_iid	paths: an instance-identifier in YANG-CBOR (cbl_yiid_read)
+		and as XPath (cbl_yxlate_iid), a schema-node path
+		(cbl_ysids_data), a NACM rule path (cbl_dnacm_path_new,
+		matched against a tree and the schema), and, after a first
+		byte that picks a leaf, a value from its canonical string
+		(cbl_yvalue_parse).  Seeds: xpathNN and their CBOR cborNN,
+		nacmN, valueN, and the two inputs it found (a list without
+		its keys, a key not UTF-8).
+  fuzz_xpath	an XPath expression: parsed, printed, parsed again to the
+		same print, evaluated over a tree of shapes.
+  fuzz_pattern	an XSD pattern, translated to an ERE and compiled.
+
+Running one
+-----------
+
+New inputs go to the first corpus directory given: give a scratch one
+first, so that the committed seeds stay as they are, and keep crash
+files out of the tree with -artifact_prefix:
+
+	mkdir -p /tmp/fz/frame
+	nice -n 10 obj/fuzz/fuzz_frame -max_total_time=600 \
+	    -artifact_prefix=/tmp/fz/frame- /tmp/fz/frame fuzz/corpus/frame
+
+Each harness takes the same options (fuzz_<name> -help=1 lists them).
+Useful ones:
+
+  -max_total_time=N	stop after N seconds
+  -jobs=N -workers=N	N processes (-fork=N was seen to hang on FreeBSD)
+  -max_len=N		inputs up to N bytes (fuzz_conn takes up to 64 KB)
+  -print_final_stats=1	runs, executions per second, peak RSS
+  -runs=0 -print_coverage=1 dir	what the seeds in dir reach
+
+For the long runs of harnesses with many small inputs (fuzz_xpath,
+fuzz_pattern, fuzz_iid), ASAN_OPTIONS=quarantine_size_mb=16 keeps
+AddressSanitizer's quarantine of freed memory from reaching libFuzzer's
+RSS limit.  LeakSanitizer does not work on FreeBSD: a leak shows only as
+RSS that keeps growing over a run (-rss_limit_mb, 2048 by default).
+
+.github/ci/sanitize.sh fuzz runs every harness for FUZZ_TIME seconds
+(default 60), as CI does.
+
+A crash
+-------
+
+libFuzzer writes the input to <artifact_prefix>crash-<sha1> (or leak-,
+timeout-, oom-) and prints the sanitizer's report.  Rerun it alone:
+
+	obj/fuzz/fuzz_frame /tmp/fz/frame-crash-<sha1>
+
+then shrink it with -minimize_crash=1 -runs=100000.  Fix it with a
+regression test in the suite that covers that code (lib/libcblink/tests
+for the wire, usr.bin/cblink-gen/tests for the YANG codec, the
+translator and the paths), and add the input to corpus/<name> when it
+reaches code no seed does.

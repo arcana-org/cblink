@@ -132,8 +132,10 @@ data they receive.
 - **No global mutable state.** All state hangs off a `cbl_ctx`, and the
   library is thread-safe as documented in API.md section 1.
 - **Fuzzing.** The parsers that see untrusted input are fuzzed with
-  libFuzzer under ASan and UBSan (`fuzz/`): frames, PROXY protocol
-  headers, XPath expressions and YANG patterns.
+  libFuzzer under ASan and UBSan (`fuzz/`): frames alone and as a
+  connection's byte stream, PROXY protocol headers, YANG-CBOR, RFC 7951
+  JSON and `.sid` files, instance-identifiers and NACM paths, XPath
+  expressions and YANG patterns.
 - **Sanitizers.** The test suite also runs under ASan+UBSan and TSan.
 - **Generator sandbox.** cblink-gen reads every module first, then works
   in capsicum(4) capability mode, with only the output directory open.

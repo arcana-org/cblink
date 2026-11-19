@@ -3,6 +3,7 @@
 #	make && make install [DESTDIR=dir] [PREFIX=/usr/local]
 #	make WITH_TESTS=yes && make WITH_TESTS=yes install DESTDIR=dir
 #	kyua test -k dir${PREFIX}/tests/cblink/Kyuafile
+#	make fuzz	# the libFuzzer harnesses, fuzz/README
 #
 # The library and the generator come first: share/cblink and the examples
 # are built with them.  The test suite and the example programs, which
@@ -38,3 +39,8 @@ SUBDIR.${MK_TESTS}+= examples \
 		tests
 
 .include <bsd.subdir.mk>
+
+# The libFuzzer harnesses (fuzz/README), not part of the build above:
+# built with clang's -fsanitize=fuzzer,address,undefined in obj/fuzz.
+fuzz: .PHONY
+	${MAKE} -C ${.CURDIR}/fuzz
