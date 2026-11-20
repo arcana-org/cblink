@@ -357,6 +357,9 @@ struct cbl_req {
 	bool			 accepts_read;
 	bool			 yds_running;	/* read for running */
 	bool			 yds_undo;	/* an edit undoing a commit */
+	const char		*yxpath;	/* a GET's filter, while read */
+	bool			 yget;		/* a GET's: its reads' warnings told */
+	int			 yreading;	/* in a get handler */
 	struct cbl_ywarn_out {
 		uint64_t	 sid;
 		char		*tag;

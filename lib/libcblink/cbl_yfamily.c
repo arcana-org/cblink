@@ -349,7 +349,7 @@ cbl_yread_tree(cbl_req *req, const uint64_t *v, size_t n, cbl_dtree **tp,
 			error = ENOMEM;
 		else {
 			req->yarg = f.arg;
-			if ((error = f.h->get(req, data, a)) != 0)
+			if ((error = cbl_yget_call(req, f.h, data, a)) != 0)
 				error = cbl_yfailed(req, error, v[i],
 				    "reading it failed");
 			else if (cbl_ymember_present(f.n, data) &&
@@ -718,7 +718,7 @@ get_one(cbl_req *req, cbl_msg *reply, uint64_t sid, bool *put)
 		error = ENOMEM;
 	else {
 		req->yarg = f.arg;
-		if ((error = f.h->get(req, data, a)) != 0)
+		if ((error = cbl_yget_call(req, f.h, data, a)) != 0)
 			error = cbl_yfailed(req, error, sid, "reading it failed");
 		else if (cbl_ymember_present(f.n, data)) {
 			error = cbl_msg_put_ymember(reply, f.n, data);
@@ -760,6 +760,10 @@ y_get_now(cbl_req *req, const cbl_msg *msg, void *arg __unused)
 		free(xpath);
 		return (error);
 	}
+	/* The filter, for a handler that would read what it selects; what
+	 * the handlers warn of, told. */
+	req->yxpath = xpath;
+	req->yget = true;
 	/* A datastore's: running or the candidate, configuration alone. */
 	if (ds != CBL_YDS_OPERATIONAL)
 		error = cbl_yds_get(req, reply, v, n, xpath, ds, wd);
@@ -770,8 +774,13 @@ y_get_now(cbl_req *req, const cbl_msg *msg, void *arg __unused)
 	    wd == CBLINK_GET_WITH_DEFAULTS_EXPLICIT && !origin && error == 0 &&
 	    i < n; i++)
 		error = get_one(req, reply, v[i], &put);
+	req->yxpath = NULL;
+	req->yget = false;
 	free(v);
 	free(xpath);
+	/* What a handler said of what it read: a list cut. */
+	if (error == 0)
+		error = cbl_yds_put_warnings(req, reply);
 	if (error != 0) {
 		cbl_msg_free(reply);
 		return (error);
@@ -970,8 +979,8 @@ y_edit_now(cbl_req *req, const cbl_msg *msg, void *arg __unused)
 				break;
 		}
 		req->yarg = e[n].f.arg;
-		if (e[n].f.h->get != NULL && (error = e[n].f.h->get(req,
-		    e[n].before, a)) != 0) {
+		if (e[n].f.h->get != NULL && (error = cbl_yget_call(req,
+		    e[n].f.h, e[n].before, a)) != 0) {
 			error = cbl_yfailed(req, error, sid, "reading it failed");
 			break;
 		}
@@ -1646,6 +1655,27 @@ cbl_req_yarg(const cbl_req *req)
 {
 
 	return (req != NULL ? req->yarg : NULL);
+}
+
+const char *
+cbl_req_yxpath(const cbl_req *req)
+{
+
+	return (req != NULL ? req->yxpath : NULL);
+}
+
+/* A get handler run: a warning it gives is a GET's answer's alone, not
+ * an EDIT's, a commit's or an undo's, which read what was there. */
+int
+cbl_yget_call(cbl_req *req, const struct cbl_yhandler *h, void *data,
+    cbl_yarena *a)
+{
+	int error;
+
+	req->yreading++;
+	error = h->get(req, data, a);
+	req->yreading--;
+	return (error);
 }
 
 int

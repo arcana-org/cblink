@@ -791,6 +791,12 @@ int		 cbl_msg_put_yget_wd(cbl_msg *msg, const uint64_t *sids,
 int		 cbl_msg_put_yget_opts(cbl_msg *msg, const uint64_t *sids,
 		    size_t n, const char *xpath, enum cbl_ywd wd, bool origin);
 void		*cbl_req_yarg(const cbl_req *req);
+/* The XPath filter of the GET a get handler reads for, NULL for none:
+ * a hint, what it selects taken by cblink after, so that a handler that
+ * holds more than it lists (a list cut at a count) may read what is
+ * selected alone, an entry by its key.  A warning a get handler gives
+ * (cbl_req_ywarn()) is in the GET's answer: a list cut, said. */
+const char	*cbl_req_yxpath(const cbl_req *req);
 int		 cbl_req_set_yerr(cbl_req *req, const char *text,
 		    uint64_t sid);
 uint64_t	 cbl_msg_err_sid(const cbl_msg *msg);

@@ -76,6 +76,8 @@ bool	cbl_yds_running_locked(cbl_req *req);
 int	cbl_yds_rpc(cbl_req *req, const cbl_msg *msg, const struct cbl_ynode *n,
 	    bool *handled);
 int	cbl_yds_put_warnings(cbl_req *req, cbl_msg *reply);
+int	cbl_yget_call(cbl_req *req, const struct cbl_yhandler *h, void *data,
+	    cbl_yarena *a);
 int	cbl_ysay(cbl_req *req, int error, uint64_t sid, const char *tag,
 	    const char *text);
 int	cbl_yread_tree(cbl_req *req, const uint64_t *v, size_t n,

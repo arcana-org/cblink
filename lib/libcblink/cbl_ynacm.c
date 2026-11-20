@@ -540,7 +540,7 @@ nacm_read(cbl_ctx *ctx, cbl_conn *conn, const struct cbl_yfound *f)
 	if ((a = cbl_yarena_new()) == NULL ||
 	    (data = cbl_yarena_alloc(a, f->n->module->size)) == NULL)
 		error = ENOMEM;
-	else if ((error = f->h->get(&r, data, a)) != 0)
+	else if ((error = cbl_yget_call(&r, f->h, data, a)) != 0)
 		(void)snprintf(said, sizeof(said), "the get handler failed: "
 		    "%s", r.err_msg != NULL ? r.err_msg : strerror(error));
 	else if (!cbl_ymember_present(f->n, data))

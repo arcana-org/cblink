@@ -228,6 +228,7 @@ CBLINK_1.0 {
 	cbl_req_ywarn;
 	cbl_ydatastore_pending;
 	cbl_req_ydatastore;
+	cbl_req_yxpath;
 	cbl_req_yundo;
 	cbl_dtree_new;
 	cbl_dtree_free;

@@ -397,7 +397,7 @@ rollback(struct cbl_yds *d, cbl_conn *conn)
 			 * as a commit's edit has it. */
 			if ((now = struct_of(f.n, NULL, 0, a, why, sizeof(why),
 			    &error)) != NULL && (f.h->get == NULL ||
-			    (error = f.h->get(&r, now, a)) == 0) &&
+			    (error = cbl_yget_call(&r, f.h, now, a)) == 0) &&
 			    (now = config_of(&f, now, a, why, sizeof(why),
 			    &error)) != NULL &&
 			    (was = struct_of(f.n, s->p, s->len, a, why,
@@ -1408,6 +1408,9 @@ cbl_req_ywarn(cbl_req *req, uint64_t sid, const char *tag, const char *text)
 
 	if (req == NULL || tag == NULL || text == NULL)
 		return (EINVAL);
+	/* A get handler's, of a read that is no GET's: not told. */
+	if (req->yreading > 0 && !req->yget)
+		return (0);
 	if ((nw = reallocarray(req->warns, req->nwarns + 1, sizeof(*nw))) ==
 	    NULL)
 		return (ENOMEM);

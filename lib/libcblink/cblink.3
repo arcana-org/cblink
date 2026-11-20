@@ -3,7 +3,7 @@
 .\"
 .\" Copyright (c) 2026 Pouria Mousavizadeh Tehrani <pouria@FreeBSD.org>
 .\"
-.Dd November 10, 2026
+.Dd November 20, 2026
 .Dt CBLINK 3
 .Os
 .Sh NAME
@@ -191,6 +191,12 @@ The handlers the server defines get the argument given with
 .Fn cbl_req_yarg ,
 and name the node at fault with
 .Fn cbl_req_set_yerr .
+A get handler sees a GET's XPath filter with
+.Fn cbl_req_yxpath ,
+a hint: what it selects is taken by cblink after, but a handler that
+lists fewer than it has may read an entry named by its key alone.
+A warning a get handler gives is in the GET's answer; one given while an
+EDIT reads what was there is not.
 They run on the loop that read the request and answer on return; after
 .Fn cbl_yserver_threads ,
 each GET, EDIT and RPC runs on a thread of its own, the request

@@ -47,11 +47,21 @@ top(const char *mod, const char *name)
 	atf_tc_fail("no %s:%s", mod, name);
 }
 
+/* The filter shapes's get handler last saw ("" for none), and whether
+ * it warns of what it read. */
+static char seen_xpath[128];
+static bool warn_reads;
+
 static int
 shapes_get(cbl_req *req, void *data, cbl_yarena *a)
 {
 
 	ATF_CHECK(cbl_req_yarg(req) == &marker);
+	(void)strlcpy(seen_xpath, cbl_req_yxpath(req) != NULL ?
+	    cbl_req_yxpath(req) : "", sizeof(seen_xpath));
+	if (warn_reads)
+		ATF_CHECK_EQ(0, cbl_req_ywarn(req, n_shapes->sid, "cut",
+		    "fewer listed"));
 	if (!have)
 		return (0);
 	return (cbl_ydecode_member(n_shapes, store.p, store.len, data, a,
@@ -854,6 +864,56 @@ ATF_TC_BODY(filter, tc)
 	teardown(&f);
 }
 
+/*
+ * A get handler sees the GET's filter (cbl_req_yxpath()), none without
+ * one; a warning it gives is in the GET's answer, not in an EDIT's,
+ * whose read of what was there gave it.
+ */
+ATF_TC_WITHOUT_HEAD(get_hint);
+ATF_TC_BODY(get_hint, tc)
+{
+	const struct cbl_ywarning *w;
+	struct fixture f;
+	cbl_msg *m, *r;
+	cbl_yarena *a;
+	size_t n;
+
+	setup(&f);
+	warn_reads = true;
+	r = NULL;
+	ATF_REQUIRE_EQ(0, edit(&f, 100, NULL, &r));
+	ATF_REQUIRE((a = cbl_yarena_new()) != NULL);
+	n = 0;
+	if (r != NULL)
+		(void)cbl_msg_ywarnings(r, a, &w, &n);
+	ATF_CHECK_EQ(0u, n);
+	cbl_msg_free(r);
+	/* With a filter: seen, and the warning in the answer. */
+	m = new_req(&f, CBL_YCMD_GET);
+	ATF_REQUIRE_EQ(0, cbl_msg_put_yget_xpath(m, &n_shapes->sid, 1,
+	    "/shapes:shapes"));
+	ATF_REQUIRE_EQ(0, cbl_request(f.c, m, &r, 5000));
+	ATF_CHECK_STREQ("/shapes:shapes", seen_xpath);
+	ATF_REQUIRE_EQ(0, cbl_msg_ywarnings(r, a, &w, &n));
+	ATF_REQUIRE_EQ(1u, n);
+	ATF_CHECK_EQ(n_shapes->sid, w[0].sid);
+	ATF_CHECK_STREQ("cut", w[0].tag);
+	ATF_CHECK_EQ(0, cbl_msg_sid_raw(r, n_shapes->sid, &(const void *){ 0 },
+	    &(size_t){ 0 }));
+	cbl_msg_free(r);
+	/* Without: none seen, the warning still told. */
+	m = new_req(&f, CBL_YCMD_GET);
+	ATF_REQUIRE_EQ(0, cbl_msg_put_yget(m, &n_shapes->sid, 1));
+	ATF_REQUIRE_EQ(0, cbl_request(f.c, m, &r, 5000));
+	ATF_CHECK_STREQ("", seen_xpath);
+	ATF_REQUIRE_EQ(0, cbl_msg_ywarnings(r, a, &w, &n));
+	ATF_CHECK_EQ(1u, n);
+	cbl_msg_free(r);
+	cbl_yarena_free(a);
+	warn_reads = false;
+	teardown(&f);
+}
+
 /* GET of system-state's os-name on c, as asked: "FreeBSD", or NULL. */
 struct slowget {
 	cbl_ctx		*ctx;
@@ -936,5 +996,6 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, threads);
 	ATF_TP_ADD_TC(tp, action);
 	ATF_TP_ADD_TC(tp, filter);
+	ATF_TP_ADD_TC(tp, get_hint);
 	return (atf_no_error());
 }
