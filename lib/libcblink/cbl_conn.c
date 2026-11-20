@@ -512,10 +512,12 @@ conn_enqueue(cbl_conn *conn, cbl_msg *msg, bool ctl)
 		return (ENOTCONN);
 	}
 	if (msg->len > conn->lim.v[CBL_LIM_MAX_FRAME] ||
-	    (conn->peer_max_frame != 0 && msg->len > conn->peer_max_frame)) {
+	    (conn->peer_max_frame != 0 && msg->len > conn->peer_max_frame) ||
+	    (conn->tx_max_frame != 0 && msg->len > conn->tx_max_frame)) {
 		/*
 		 * The peer would refuse it: larger than it said it takes
-		 * (ctrl hello), or than we take.
+		 * (ctrl hello), or than we take.  Or the transport cannot
+		 * send it whole: refused here, the connection kept.
 		 */
 		pthread_mutex_unlock(&conn->mtx);
 		cbl_msg_free(msg);

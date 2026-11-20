@@ -25,7 +25,7 @@
  * SCTP stream here (see cbl_tls.c for the DTLS side).
  */
 
-#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 
@@ -33,6 +33,7 @@
 #include <netinet/sctp.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
@@ -471,7 +472,9 @@ const struct cbl_tr_ops cbl_tr_sctp_ops = {
 /*
  * Socket buffers that hold a max_frame message: a plaintext frame is
  * sent and received as one SCTP message.  Best effort, within
- * kern.ipc.maxsockbuf.
+ * kern.ipc.maxsockbuf: a message larger than the send buffer is never
+ * sent (sctp_sendv(3) EMSGSIZE, the association ended with it), so a
+ * frame past the buffer we got is refused when it is queued instead.
  */
 void
 cbl_sctp_buffers(cbl_conn *conn)
@@ -479,13 +482,20 @@ cbl_sctp_buffers(cbl_conn *conn)
 	int want, have;
 	socklen_t len;
 
-	want = (int)(conn->lim.v[CBL_LIM_MAX_FRAME] + SCTP_CHUNK);
+	want = (int)MIN(conn->lim.v[CBL_LIM_MAX_FRAME] + SCTP_CHUNK, INT_MAX);
 	for (int opt = SO_SNDBUF; ; opt = SO_RCVBUF) {
 		len = sizeof(have);
 		if (getsockopt(conn->fd, SOL_SOCKET, opt, &have, &len) == 0 &&
 		    have < want)
 			(void)setsockopt(conn->fd, SOL_SOCKET, opt, &want,
 			    sizeof(want));
+		if (opt == SO_SNDBUF) {
+			len = sizeof(have);
+			if (getsockopt(conn->fd, SOL_SOCKET, opt, &have,
+			    &len) == 0 && have > 0 &&
+			    (uint64_t)have < conn->lim.v[CBL_LIM_MAX_FRAME])
+				conn->tx_max_frame = (size_t)have;
+		}
 		if (opt == SO_RCVBUF)
 			break;
 	}

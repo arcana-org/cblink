@@ -6,6 +6,8 @@
 
 /* Plaintext SCTP server behaviour seen from a raw SCTP socket. */
 
+#include <sys/sysctl.h>
+
 #include <netinet/sctp.h>
 
 #include <stdlib.h>
@@ -312,10 +314,85 @@ ATF_TC_BODY(large_messages, tc)
 	sfx_stop(&f);
 }
 
+/*
+ * max_frame past what an SCTP socket's send buffer can be (within
+ * kern.ipc.maxsockbuf): a frame larger than the buffer is refused when
+ * queued, EMSGSIZE, and the association kept.  Sent, sctp_sendv(3)
+ * refused it whole and the connection ended with it.
+ */
+ATF_TC_WITHOUT_HEAD(past_send_buffer);
+ATF_TC_BODY(past_send_buffer, tc)
+{
+	struct sockaddr_storage ss;
+	struct sockaddr_in *sin = (struct sockaddr_in *)&ss;
+	socklen_t len = sizeof(ss);
+	cbl_ctx *sctx, *ctx;
+	cbl_loop *loop;
+	cbl_listener *l;
+	cbl_family *fam;
+	cbl_conn *c;
+	cbl_msg *req, *rsp = NULL;
+	pthread_t thr;
+	unsigned char *big;
+	u_long maxsb;
+	size_t sz = sizeof(maxsb);
+	char uri[64];
+	int fd;
+
+	if ((fd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)) == -1)
+		atf_tc_skip("SCTP is not available: %s", strerror(errno));
+	close(fd);
+	ATF_REQUIRE(sysctlbyname("kern.ipc.maxsockbuf", &maxsb, &sz, NULL,
+	    0) == 0);
+	sctx = test_ctx();
+	ctx = test_ctx();
+	ATF_REQUIRE_EQ(0, cbl_ctx_set_limit(sctx, CBL_LIM_MAX_FRAME,
+	    2 * maxsb));
+	ATF_REQUIRE_EQ(0, cbl_ctx_set_limit(ctx, CBL_LIM_MAX_FRAME,
+	    2 * maxsb));
+	ATF_REQUIRE_EQ(0, cbl_family_register(sctx, &s_def, NULL, &fam));
+	ATF_REQUIRE_EQ(0, cbl_loop_new(sctx, &loop));
+	ATF_REQUIRE_EQ(0, cbl_listener_new(sctx, "sctp://127.0.0.1:0",
+	    CBL_PLAINTEXT, &l));
+	ATF_REQUIRE_EQ(0, cbl_listener_start(l, loop));
+	ATF_REQUIRE_EQ(0, cbl_listener_addr(l, &ss, &len));
+	snprintf(uri, sizeof(uri), "sctp://127.0.0.1:%u",
+	    ntohs(sin->sin_port));
+	ATF_REQUIRE_EQ(0, pthread_create(&thr, NULL, sloop, loop));
+	ATF_REQUIRE_EQ(0, cbl_conn_new(ctx, uri, CBL_PLAINTEXT, &c));
+	ATF_REQUIRE_MSG(cbl_conn_connect(c) == 0, "connect: %s",
+	    cbl_conn_errstr(c));
+	ATF_REQUIRE_EQ(0, cbl_hello(c));
+	/* kern.ipc.maxsockbuf bytes: more than any buffer it allows. */
+	ATF_REQUIRE((big = calloc(1, maxsb)) != NULL);
+	ATF_REQUIRE_EQ(0, cbl_msg_new(ctx, cbl_family_id(fam), S_ECHO, 0,
+	    &req));
+	ATF_REQUIRE_EQ(0, t_put_bytes(req, 1, big, maxsb));
+	ATF_REQUIRE_EQ(EMSGSIZE, cbl_request(c, req, &rsp, 5000));
+	ATF_REQUIRE(rsp == NULL);
+	/* The association kept: one that fits still goes. */
+	ATF_REQUIRE_EQ(0, cbl_ping(c, 2000));
+	ATF_REQUIRE_EQ(0, cbl_msg_new(ctx, cbl_family_id(fam), S_ECHO, 0,
+	    &req));
+	ATF_REQUIRE_EQ(0, t_put_bytes(req, 1, big, 100000));
+	ATF_REQUIRE_EQ(0, cbl_request(c, req, &rsp, 5000));
+	cbl_msg_free(rsp);
+	free(big);
+	cbl_conn_free(c);
+	cbl_loop_stop(loop);
+	pthread_join(thr, NULL);
+	cbl_listener_free(l);
+	cbl_loop_free(loop);
+	ATF_REQUIRE_EQ(0, cbl_family_unregister(fam));
+	cbl_ctx_free(sctx);
+	cbl_ctx_free(ctx);
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 
 	ATF_TP_ADD_TC(tp, stream_mapping);
 	ATF_TP_ADD_TC(tp, large_messages);
+	ATF_TP_ADD_TC(tp, past_send_buffer);
 	return (atf_no_error());
 }

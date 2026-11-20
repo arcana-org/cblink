@@ -846,6 +846,9 @@ struct cbl_conn {
 
 	struct cbl_peer			 peer;
 	uint64_t			 peer_max_frame;	/* from hello */
+	/* The largest frame the transport sends whole, 0: max_frame (an
+	 * SCTP socket's send buffer, cbl_sctp_buffers()). */
+	size_t				 tx_max_frame;
 	/* A PROXY header still to read (CBL_LF_PROXY), and what has come. */
 	bool				 proxy_wait;
 	unsigned char			*proxy_buf;
